@@ -10,7 +10,7 @@ from models.Recon_subnetwork import UNetModel, update_ema_params
 from models.Seg_subnetwork import SegmentationSubNetwork
 from tqdm import tqdm
 import torch.nn as nn
-from data.dataset_beta_thresh import MVTecTrainDataset,MVTecTestDataset,VisATrainDataset,VisATestDataset,DAGMTrainDataset,DAGMTestDataset,MPDDTestDataset,MPDDTrainDataset
+from data.dataset_beta_thresh import MVTecTrainDataset,MVTecTestDataset
 from math import exp
 import torch.nn.functional as F
 from models.DDPM import GaussianDiffusionModel, get_beta_schedule
@@ -20,13 +20,13 @@ from sklearn.metrics import roc_auc_score,auc,average_precision_score
 import pandas as pd
 from collections import defaultdict
 
-def weights_init(m):
-        classname = m.__class__.__name__
-        if classname.find('Conv') != -1:
-            m.weight.data.normal_(0.0, 0.02)
-        elif classname.find('BatchNorm') != -1:
-            m.weight.data.normal_(1.0, 0.02)
-            m.bias.data.fill_(0)    
+# def weights_init(m):
+#         classname = m.__class__.__name__
+#         if classname.find('Conv') != -1:
+#             m.weight.data.normal_(0.0, 0.02)
+#         elif classname.find('BatchNorm') != -1:
+#             m.weight.data.normal_(1.0, 0.02)
+#             m.bias.data.fill_(0)    
 
 def defaultdict_from_json(jsonDict):
     func = lambda: defaultdict(str)
@@ -258,61 +258,22 @@ def main():
     args['arg_num'] = file[4:-5]
     args = defaultdict_from_json(args)
 
-
     mvtec_classes = ['carpet', 'grid', 'leather', 'tile', 'wood', 'bottle', 'cable', 'capsule', 'hazelnut', 'metal_nut', 'pill', 'screw',
             'toothbrush', 'transistor', 'zipper']
-    
-    visa_classes = ['candle', 'capsules', 'cashew', 'chewinggum', 'fryum', 'macaroni1', 'macaroni2', 'pcb1', 'pcb2',
-             'pcb3', 'pcb4', 'pipe_fryum']
-    
-    mpdd_classes = ['bracket_black', 'bracket_brown', 'bracket_white', 'connector', 'metal_plate', 'tubes'] 
-    dagm_class = ['Class1', 'Class2', 'Class3', 'Class4', 'Class5','Class6', 'Class7', 'Class8', 'Class9', 'Class10']
-
-
     current_classes = mvtec_classes
 
     class_type = ''
     for sub_class in current_classes:    
         print("class",sub_class)
-        if sub_class in visa_classes:
-            subclass_path = os.path.join(args["visa_root_path"],sub_class)
-            print(subclass_path)
-            training_dataset = VisATrainDataset(
-                subclass_path,sub_class,img_size=args["img_size"],args=args
-                )
-            testing_dataset = VisATestDataset(
-                subclass_path,sub_class,img_size=args["img_size"],
-                )
-            class_type='VisA'
-        elif sub_class in mpdd_classes:
-            subclass_path = os.path.join(args["mpdd_root_path"],sub_class)
-            training_dataset = MPDDTrainDataset(
-                subclass_path,sub_class,img_size=args["img_size"],args=args
-                )
-            testing_dataset = MPDDTestDataset(
-                subclass_path,sub_class,img_size=args["img_size"],
-                )
-            class_type='MPDD'
-        elif sub_class in mvtec_classes:
-            subclass_path = os.path.join(args["mvtec_root_path"],sub_class)
-            training_dataset = MVTecTrainDataset(
-                subclass_path,sub_class,img_size=args["img_size"],args=args
-                )
-            testing_dataset = MVTecTestDataset(
-                subclass_path,sub_class,img_size=args["img_size"],
-                )
-            class_type='MVTec'
-        elif sub_class in dagm_class:
-            subclass_path = os.path.join(args["dagm_root_path"],sub_class)
-            training_dataset = DAGMTrainDataset(
-                subclass_path,sub_class,img_size=args["img_size"],args=args
-                )
-            testing_dataset =DAGMTestDataset(
-                subclass_path,sub_class,img_size=args["img_size"],
-                )
-            class_type='DAGM'
+        subclass_path = os.path.join(args["mvtec_root_path"],sub_class)
+        training_dataset = MVTecTrainDataset(
+            subclass_path,sub_class,img_size=args["img_size"],args=args
+            )
+        testing_dataset = MVTecTestDataset(
+            subclass_path,sub_class,img_size=args["img_size"],
+            )
+        class_type='MVTec'
         
-
         print(file, args)     
 
         data_len = len(testing_dataset) 

@@ -1,5 +1,16 @@
 **/._*
 VENV_DiffusionAD
 **/__pycache__
+
 Diffuwarp.e*
 Diffuwarp.o*
+Diffuwarp_test.e*
+Diffuwarp_test.o*
+
+tensorboard
+output
+
+**/*.pt
+*.log
+*.csv
+*.png

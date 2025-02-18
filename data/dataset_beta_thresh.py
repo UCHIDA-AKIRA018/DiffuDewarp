@@ -10,9 +10,7 @@ from torchvision import transforms
 import random
 from data.perlin import rand_perlin_2d_np
 
-texture_list = ['carpet', 'zipper', 'leather', 'tile', 'wood','grid',
-                'Class1', 'Class2', 'Class3', 'Class4', 'Class5',
-                 'Class6', 'Class7', 'Class8', 'Class9', 'Class10']
+texture_list = ['carpet', 'zipper', 'leather', 'tile', 'wood','grid']
 class MVTecTestDataset(Dataset):
 
     def __init__(self, data_path,classname,img_size):
@@ -25,10 +23,15 @@ class MVTecTestDataset(Dataset):
 
     def transform_image(self, image_path, mask_path):
         image = cv2.cvtColor(cv2.imread(image_path),cv2.COLOR_BGR2RGB)
+        if mask_path is None or not os.path.exists(mask_path):
+            mask_path = None
+        
         if mask_path is not None:
             mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            mask = np.tile(mask[..., np.newaxis], (1, 1, 3))
         else:
-            mask = np.zeros((image.shape[0], image.shape[1]))
+            mask = np.zeros((image.shape[0], image.shape[1],3))
+
         if self.resize_shape != None:
             image = cv2.resize(image, dsize=(
                 self.resize_shape[1], self.resize_shape[0]))
@@ -41,7 +44,7 @@ class MVTecTestDataset(Dataset):
         image = np.array(image).reshape(
             (image.shape[0], image.shape[1], 3)).astype(np.float32)
         mask = np.array(mask).reshape(
-            (mask.shape[0], mask.shape[1], 1)).astype(np.float32)
+            (mask.shape[0], mask.shape[1], 3)).astype(np.float32)
 
         image = np.transpose(image, (2, 0, 1))
         mask = np.transpose(mask, (2, 0, 1))
@@ -65,8 +68,25 @@ class MVTecTestDataset(Dataset):
             image, mask = self.transform_image(img_path, mask_path)
             has_anomaly = np.array([1], dtype=np.float32)
 
+        # only clip
+        thresh_path = img_path.replace('test', 'DISthresh_test')
+        thresh = torch.ones((self.resize_shape[1], self.resize_shape[0]))
+        if os.path.exists(thresh_path):
+            thresh = cv2.imread(thresh_path, cv2.IMREAD_GRAYSCALE)
+            thresh = cv2.resize(thresh, dsize=(self.resize_shape[1], self.resize_shape[0]))
+        thresh = np.array(thresh).astype(np.float32)/255.0 
+
+        # only clip
+        csv_path = img_path.replace('test', 'point').replace('png', 'csv')
+        points = []
+        if os.path.exists(csv_path):
+            with open(csv_path, mode='r', encoding='utf-8') as file:
+                reader = csv.reader(file)
+                for row in reader:
+                    points = row # 
+
         sample = {'image': image, 'has_anomaly': has_anomaly,
-                  'mask': mask, 'idx': idx,'type':img_path[len(self.root_dir):-8],'file_name':base_dir+'_'+file_name}
+                  'mask': mask, 'idx': idx, 'type':img_path[len(self.root_dir):-8], 'file_name':base_dir+'_'+file_name, 'object_mask': thresh, 'points': points}
 
         return sample
 
@@ -173,10 +193,10 @@ class MVTecTrainDataset(Dataset):
         no_anomaly = torch.rand(1).numpy()[0]
         if no_anomaly > 0.5:
             image = image.astype(np.float32)
-            return image, np.zeros((self.resize_shape[0], self.resize_shape[1], 1), dtype=np.float32), np.array([0.0], dtype=np.float32)
+            return image, np.zeros((self.resize_shape[0], self.resize_shape[1], 1), dtype=np.float32), np.array([0.0], dtype=np.float32), np.zeros((self.resize_shape[0], self.resize_shape[1], 1), dtype=np.float32), image
 
         else:
-            perlin_scale = 6  
+            perlin_scale = 2  
             min_perlin_scale = 0
             perlin_scalex = 2 ** (torch.randint(min_perlin_scale,
                                   perlin_scale, (1,)).numpy()[0])
@@ -195,6 +215,9 @@ class MVTecTrainDataset(Dataset):
                 object_perlin = thresh*perlin_thr
 
                 object_perlin = np.expand_dims(object_perlin, axis=2).astype(np.float32)  
+
+                perlin_thr = np.expand_dims(perlin_thr, axis=2).astype(np.float32) 
+                perlin_mask = (perlin_thr).astype(np.float32) 
 
                 msk = (object_perlin).astype(np.float32) 
                 if np.sum(msk) !=0: 
@@ -246,6 +269,12 @@ class MVTecTrainDataset(Dataset):
                     img_object_thr = mixer_cut_image.astype(
                         np.float32) * object_perlin/255.0
 
+            aug = self.randAugmenter()
+            anomaly_source_img = cv2.cvtColor(cv2.imread(anomaly_source_path),cv2.COLOR_BGR2RGB)
+            anomaly_source_img = cv2.resize(anomaly_source_img, dsize=(
+                self.resize_shape[1], self.resize_shape[0]))
+            anomaly_img_augmented = aug(image=anomaly_source_img) / 255
+            
             beta = torch.rand(1).numpy()[0] * 0.6 + 0.2
             augmented_image = image * \
                 (1 - object_perlin) + (1 - beta) * \
@@ -253,7 +282,7 @@ class MVTecTrainDataset(Dataset):
 
             augmented_image = augmented_image.astype(np.float32)
 
-            return augmented_image, msk, np.array([has_anomaly], dtype=np.float32)
+            return augmented_image, msk, np.array([has_anomaly], dtype=np.float32), perlin_mask, anomaly_img_augmented,
 
 
     def __getitem__(self, idx):
@@ -273,14 +302,15 @@ class MVTecTrainDataset(Dataset):
         
         anomaly_source_idx = torch.randint(0, len(self.anomaly_source_paths), (1,)).item()
         anomaly_path = self.anomaly_source_paths[anomaly_source_idx]
-        augmented_image, anomaly_mask, has_anomaly  = self.perlin_synthetic(image,thresh,anomaly_path,cv2_image,thresh_path)
+        augmented_image, anomaly_mask, has_anomaly, perlin_mask, anomaly_img_augmented  = self.perlin_synthetic(image,thresh,anomaly_path,cv2_image,thresh_path)
+        _, _, _, perlin_mask_sec, _ = self.perlin_synthetic(image,thresh,anomaly_path,cv2_image,thresh_path)
         
         augmented_image = np.transpose(augmented_image, (2, 0, 1))
         image = np.transpose(image, (2, 0, 1))
         anomaly_mask = np.transpose(anomaly_mask, (2, 0, 1))
-
+        anomaly_img_augmented = np.transpose(anomaly_img_augmented, (2, 0, 1))
 
         sample = {'image': image, "anomaly_mask": anomaly_mask,
-                  'augmented_image': augmented_image, 'has_anomaly': has_anomaly, 'idx': idx}
+                  'augmented_image': augmented_image, 'has_anomaly': has_anomaly, 'idx': idx, 'perlin_mask': perlin_mask, 'perlin_mask_sec': perlin_mask_sec, 'anomaly_img_augmented': anomaly_img_augmented, 'object_mask': thresh}
 
         return sample

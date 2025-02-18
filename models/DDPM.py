@@ -88,6 +88,42 @@ def discretised_gaussian_log_likelihood(x, means, log_scales):
     return log_probs
 
 
+def generate_simplex_noise(
+        Simplex_instance, x, t, frequency, random_param=False, octave=6, persistence=0.8,
+        in_channels=1
+        ):
+    noise = torch.empty(x.shape).to(x.device)
+    for i in range(in_channels):
+        Simplex_instance.newSeed()
+        if random_param:
+            param = random.choice(
+                    [(2, 0.6, 16), (6, 0.6, 32), (7, 0.7, 32), (10, 0.8, 64), (5, 0.8, 16), (4, 0.6, 16), (1, 0.6, 64),
+                     (7, 0.8, 128), (6, 0.9, 64), (2, 0.85, 128), (2, 0.85, 64), (2, 0.85, 32), (2, 0.85, 16),
+                     (2, 0.85, 8),
+                     (2, 0.85, 4), (2, 0.85, 2), (1, 0.85, 128), (1, 0.85, 64), (1, 0.85, 32), (1, 0.85, 16),
+                     (1, 0.85, 8),
+                     (1, 0.85, 4), (1, 0.85, 2), ]
+                    )
+            # 2D octaves seem to introduce directional artifacts in the top left
+            noise[:, i, ...] = torch.unsqueeze(
+                torch.from_numpy(
+                    Simplex_instance.rand_3d_fixed_T_octaves(
+                            x.shape[:,i,:,:], t.detach().cpu().numpy(), param[0], param[1],
+                            param[2]
+                            )
+                    ).to(x.device), 0
+                ).repeat(x.shape[0], 1, 1, 1)
+        else:
+            for b in range(x.shape[0]):
+                noise[b, i, ...] = torch.unsqueeze(
+                    torch.from_numpy(
+                            Simplex_instance.rand_3d_fixed_T_octaves(
+                                    x.shape[-2:], t[b:b+1].detach().cpu().numpy(), octave,
+                                    persistence, frequency[b]
+                                    )
+                            ).to(x.device), 0
+                    )
+    return noise
 
 
 class GaussianDiffusionModel:
@@ -98,12 +134,14 @@ class GaussianDiffusionModel:
             img_channels=1,
             loss_type="l2",  # l2,l1 hybrid
             loss_weight='none',  # prop t / uniform / None
-            noise="gauss",  # gauss / perlin / simplex
+            mode="DiffusionAD",  # DiffusionAD / Diffuwarp
             ):
         super().__init__()
 
-        if noise == "gauss":
+        if mode == "DiffusionAD":
             self.noise_fn = lambda x, t: torch.randn_like(x)
+        elif mode == "DiffuDewarp":
+            self.noise_fn = lambda x, t, frequency: generate_simplex_noise(self.simplex, x, t, frequency, False, in_channels=3, octave=2)
 
         self.img_size = img_size
         self.img_channels = img_channels
@@ -392,3 +430,410 @@ class GaussianDiffusionModel:
         pred_x_0 = self.predict_x_0_from_eps(x_t, t, estimate_noise).clamp(-1, 1)
         return loss,pred_x_0,x_t
 
+
+    def new_warping_denoising_batch(self, model, x_0, args, perlin_mask=None, perlin_mask_sec=None, object_mask=None, another_image=None, t=None, mode="train"):
+        # model: unet
+        # x_0: train_image (no-synanomaly) torch.Size([16, 3, 256, 256])
+        # perlin_mask: torch.Size([16, 256, 256, 1])
+        # object_mask 前景箇所(テクスチャはランダムな場所に出る) torch.Size([16, 256, 256]) 
+        # t: time
+        # mode: train or eval
+
+        # datasetで定義されているtextureはランダムなマスクが入ってくる (carpet内にあるもの)
+        object_mask = (object_mask > 0).float().unsqueeze(3)  # torch.Size([16, 256, 256, 1])
+        
+        if t == None:
+            t = torch.randint(0, self.num_timesteps, (x_0.shape[0],), device=x_0.device)
+
+        # anomaly_labels 0 good 1 anomaly(clip) 3 anomaly(MVtec)
+        if args['subclass'] == 'crip': 
+            anomaly_labels = torch.randint(0, 2, (x_0.shape[0],), device=x_0.device)
+        else: 
+            anomaly_labels = torch.ones_like(t)*3
+        
+        target_areas = torch.randint(50, 1250, (x_0.shape[0],)) / args['img_size'][0] / args['img_size'][0] * x_0.shape[2] * x_0.shape[2] # Adjust area range as needed
+
+        if args['subclass'] == 'crip': 
+            # x_0をobejctmaskでcropし、それ以外は真っ黒に
+            # x_0: train_image (no-synanomaly) torch.Size([16, 3, 256, 256])
+            x_0 = torch.zeros_like(x_0) + x_0 * object_mask.permute(0,3,1,2).repeat(1, 3, 1, 1)
+            back_image = torch.zeros_like(x_0)  # 背景は真っ黒
+            object_mask_cropped = self.make_line_mask(object_mask)
+        else:
+            object_mask_cropped = object_mask
+            
+        # clipのためのマスクと基準点 
+        mask, target_point = self.make_random_mask_for_bend(object_mask_cropped, target_areas)
+        if args['subclass'] != 'crip': 
+            mask = perlin_mask
+            back_image = x_0.clone()
+
+        # ラベルが0ならなしに　
+        mask = mask * ((anomaly_labels == 1) | (anomaly_labels == 3)).view(x_0.shape[0], 1, 1, 1)
+        
+        # 30度から180度の範囲でランダムな角度を生成（正負含む）
+        degrees = torch.rand(x_0.shape[0]) * (90 - 0)
+        radians = degrees * (torch.pi / 180)  # ラジアンに変換
+        # 正負の符号をランダムに決定
+        sign = torch.where(torch.rand(x_0.shape[0]) < 0.5, -1, 1)  # ±1の符号
+        max_angle = (radians * sign).to(x_0.device) * (anomaly_labels != 3)  
+
+        angle_t = max_angle * t / self.num_timesteps
+        angle_t_1 = max_angle * torch.clamp(t-1, min=0) / self.num_timesteps
+
+        if args['subclass'] == 'crip': 
+            frequency = torch.full((t.shape[0],), 64) / args['img_size'][0] * x_0.shape[2]
+            noise_rate = torch.full((t.shape[0],), 6) / args['img_size'][0] * x_0.shape[2]
+        else:
+            frequency = torch.full((t.shape[0],), 32) / args['img_size'][0] * x_0.shape[2]
+            noise_rate = torch.full((t.shape[0],), 10) / args['img_size'][0] * x_0.shape[2]
+        noise = self.noise_fn(x_0, t, frequency.numpy()).float()
+        
+        if args['subclass'] == 'crip': 
+            isDeformation = (torch.rand(noise.shape[0]) < 0.5).to(x_0.device)
+        else:
+            isDeformation= (torch.ones_like(isDeformation).bool()).to(x_0.device)
+
+        noise = noise[:,:2, :, :] * isDeformation.float().view(noise.shape[0], 1, 1, 1)  # (16, 1, 1, 1)
+        max_noise = noise / noise_rate.view(t.shape[0], 1, 1, 1).to(x_0.device)
+        max_noise = max_noise * ((anomaly_labels == 1) | (anomaly_labels == 3)).view(x_0.shape[0], 1, 1, 1)
+
+        noise_t = max_noise/ self.num_timesteps * t.view(-1, 1, 1, 1).to(x_0.device)
+        noise_t_1 = max_noise/ self.num_timesteps * torch.clamp(t-1, min=0).view(-1, 1, 1, 1).to(x_0.device)
+        flow_t = noise_t.permute(0, 2, 3, 1)
+        flow_t_1 = noise_t_1.permute(0, 2, 3, 1)
+        
+        # x_t, x_t_1の作成
+        if args['subclass'] == 'crip': 
+            straight_mask = (torch.rand(x_0.shape[0]) > 0.5) # 50%の確率でTrueまたはFalseを生成
+        else:
+            straight_mask = torch.ones(x_0.shape[0]) > 0.5 #全てstraight_mask
+
+        x_t, mask_x_t, flow_x_t_from_x_0  = self.make_anomaly_bend(x_0, mask, target_point, angle_t, back_image, flow_t, straight_mask)
+        x_t_1, _, _ = self.make_anomaly_bend(x_0, mask, target_point, angle_t_1, back_image, flow_t_1, straight_mask)
+        
+        perlin_mask_sec = perlin_mask_sec.squeeze(-1)  # [16, 256, 256]
+        perlin_mask_sec[mask_x_t.squeeze(1) > 0] = 0
+        perlin_mask_sec[mask.squeeze(-1) > 0] = 0
+        perlin_mask_sec[object_mask.squeeze(-1) == 0] = 0
+        perlin_mask_sec_tmp = perlin_mask_sec.unsqueeze(-1).clone()
+        perlin_mask_sec = perlin_mask_sec.unsqueeze(-1) * (anomaly_labels != 0).view(x_0.shape[0], 1, 1, 1)
+
+        max_alpha = torch.ones(x_0.shape[0], device=x_0.device).view(-1, 1, 1, 1)*0.5
+        alpha_t = max_alpha
+
+        if args['anomaly_color']:
+            x_t = self.make_anomaly_color(x_t,perlin_mask_sec,another_image, alpha_t)
+            x_t_1 = self.make_anomaly_color(x_t_1,perlin_mask_sec,another_image,alpha_t)
+
+        # 形状を 16, 3, 256, 256 にリサイズ
+        x_0 = torch.nn.functional.interpolate(x_0, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
+        x_t = torch.nn.functional.interpolate(x_t, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
+        x_t_1 = torch.nn.functional.interpolate(x_t_1, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
+        flow_x_t_from_x_0 = torch.nn.functional.interpolate(flow_x_t_from_x_0, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
+        mask_x_t = torch.nn.functional.interpolate(mask_x_t, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
+
+        # modelによる推定
+        estimate_x_t_1 = model(x_t, t)
+
+        if args['output_type'] == 'flow_from_0&x_0&x_pre_t':
+            estimate_x_0 = estimate_x_t_1[:,:3,:,:]
+            estimate_flow_x_t_from_x_0 = estimate_x_t_1[:,3:,:,:]
+            estimate_x_t_1, estimate_mask_x_t_1  = self.make_pre_image(x_t, estimate_flow_x_t_from_x_0, t, mask_x_t)
+            estimate_x_t_1 = self.interporate_pre_image(estimate_x_t_1,estimate_mask_x_t_1,estimate_x_0,mask_x_t)
+        elif args['output_type'] == 'flow_from_0&x_0':
+            estimate_x_0 = estimate_x_t_1[:,:3,:,:]
+            estimate_flow_x_t_from_x_0 = estimate_x_t_1[:,3:,:,:]
+        
+        # loss計算
+        loss_flow = mean_flat((estimate_flow_x_t_from_x_0 - flow_x_t_from_x_0).abs())
+        if args['output_type'] == 'flow_from_0&x_0':
+            loss = loss_flow + mean_flat((estimate_x_0 - x_0).abs())
+        elif args['output_type'] == 'flow_from_0&x_0&x_pre_t':
+            loss = loss_flow + mean_flat((estimate_x_t_1 - x_t_1).abs())+ mean_flat((estimate_x_0 - x_0).abs())
+
+        return loss.mean(), x_t, mask_x_t, estimate_x_0
+
+
+    def make_line_mask(self, mask):
+        # mask shape: (batchsize, 256, 256, 1) のPyTorchテンソル
+        batch_size = mask.shape[0]
+        result_mask = mask.clone()  # 結果を格納するためのマスクをコピー
+
+        # バッチ毎に処理
+        for i in range(batch_size):
+            # (バッチ内の)単一のマスクを取得
+            single_mask = result_mask[i, :, :, 0].cpu().numpy().astype(np.uint8)*255  # PyTorchテンソル -> NumPy配列
+
+            # Sobelフィルタによるエッジ検出
+            sobel_x = cv2.Sobel(single_mask, cv2.CV_32F, 1, 0, ksize=5)
+            sobel_y = cv2.Sobel(single_mask, cv2.CV_32F, 0, 1, ksize=5)
+            sobel_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+            sobel_magnitude = np.abs(sobel_magnitude)
+
+            # エッジを二値化
+            binary_image = np.where(sobel_magnitude > 200, 255, 0).astype(np.uint8)
+
+            # ハフ変換で線分検出
+            minLineLength = 100
+            maxLineGap = 120
+            threshold = 50
+            lines = cv2.HoughLinesP(binary_image, 1, np.pi/180, threshold, minLineLength=minLineLength, maxLineGap=maxLineGap)
+            
+            # 全てのラインを描画
+            img_with_lines = cv2.cvtColor(single_mask, cv2.COLOR_GRAY2RGB)  # グレースケール -> カラー画像
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(img_with_lines, (x1, y1), (x2, y2), (0, 255, 0), 2)  # 線を描画
+
+            if lines is not None:
+                # 線分の角度を計算
+                def calculate_angle(line):
+                    x1, y1, x2, y2 = line[0]
+                    return np.arctan2(y2 - y1, x2 - x1)
+
+                angles = [calculate_angle(line) for line in lines]
+                mean_angle = np.mean(angles)
+
+                # 平均角度から外れた線分を除外
+                angle_tolerance = np.deg2rad(2)
+                lines = [line for line, angle in zip(lines, angles) if abs(angle - mean_angle) <= angle_tolerance]
+
+                img_with_lines = cv2.cvtColor(single_mask, cv2.COLOR_GRAY2RGB)  # グレースケール -> カラー画像
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    cv2.line(img_with_lines, (x1, y1), (x2, y2), (0, 255, 0), 2)  # 線を描画
+
+                # # 描画した画像を保存
+                # cv2.imwrite(f"test_{i}_lines_th.png", img_with_lines)
+
+                if len(lines) >= 2:
+                    # 線分の距離を計算する関数
+                    def line_distance(line1, line2):
+                        x1, y1, x2, y2 = line1[0]
+                        x3, y3, x4, y4 = line2[0]
+                        return min(np.hypot(x1 - x3, y1 - y3), np.hypot(x2 - x4, y2 - y4),
+                                np.hypot(x1 - x4, y1 - y4), np.hypot(x2 - x3, y2 - y3))
+
+                    # 条件に合う2本の線分をランダムに選択
+                    min_distance, max_distance = 5, 8
+                    line1 = random.choice(lines)
+                    line2 = next((l for l in lines if line1 is not l and min_distance <= line_distance(line1, l) <= max_distance), None)
+
+                    if line2 is not None:
+                        # 2本の線分の端点を取得
+                        (x1, y1, x2, y2), (x3, y3, x4, y4) = line1[0], line2[0]
+
+                        # マスク作成
+                        mask = np.zeros_like(single_mask)
+                        pts = np.array([(x1, y1), (x2, y2), (x4, y4), (x3, y3)], dtype=np.int32)
+                        cv2.fillPoly(mask, [pts], 255)
+
+                        # 生成したマスクを元のマスクに適用
+                        single_mask = cv2.bitwise_and(single_mask, mask)
+            
+            # もし線分が見つからなければ、そのまま元のマスクを保持
+            result_mask[i, :, :, 0] = torch.from_numpy(single_mask)/255
+
+        return result_mask
+
+
+    def interporate_pre_image(self,x_t_1,x_t_1_mask,x_0,x_t_mask):
+        # x_t_1: train_image (no-synanomaly) torch.Size([16, 3, 256, 256])
+        # x_t_1_mask: train_image (no-synanomaly) torch.Size([16, 1, 256, 256])
+        # x_0: train_image (no-synanomaly) torch.Size([16, 3, 256, 256])
+        # x_t_mask: train_image (no-synanomaly) torch.Size([16, 1, 256, 256])
+        exclusive_mask = (x_t_mask == 1) & (x_t_1_mask == 0)  # mask areas in x_t_mask only
+        # Step 2: Expand mask dimensions to match x_t_1's channels if needed
+        exclusive_mask_expanded = exclusive_mask.repeat(1, x_t_1.shape[1], 1, 1)
+        # Step 3: Replace masked areas in x_t_1 with values from x_0
+        x_t_1_interpolated = torch.where(exclusive_mask_expanded, x_0, x_t_1)
+
+        return x_t_1_interpolated
+
+
+    def make_pre_image(self, x_t, flow_t_from_0, t, target_mask):
+        # z = ~target_mask.bool() * 9 + 1
+        z = target_mask.bool()
+        # t が 0 のインデックスを取得
+        mask = t == 0
+        # 結果用のテンソルをゼロで初期化
+        flow_t_from_0 = flow_t_from_0 * x_t.shape[3] / 2
+
+        flow_scale = torch.zeros_like(flow_t_from_0)
+        flow_scale[~mask] = flow_t_from_0[~mask] / t[~mask].view(-1, 1, 1, 1)
+        
+        x_t_1 = softsplat(tenIn=x_t, tenFlow=flow_scale, tenMetric=(z).clip(0.001, 1.0), strMode='linear')
+        x_t_1_mask = softsplat(tenIn=target_mask, tenFlow=flow_scale, tenMetric=(z).clip(0.001, 1.0), strMode='linear')
+        return x_t_1, x_t_1_mask
+
+
+    def make_random_mask_for_bend(self, object_mask, target_areas):
+        # object_mask is of shape [16, 256, 256, 1]
+        batch_size, height, width, _ = object_mask.shape
+        object_mask = object_mask.squeeze(-1)  # Shape [16, 256, 256]
+
+        # Initialize the final mask and last updated points
+        final_mask = torch.zeros_like(object_mask)
+        last_updated_points = [None] * batch_size
+
+        # Step 1: Initialize with a random point for each batch item
+        for b in range(batch_size):
+            non_zero_indices = torch.nonzero(object_mask[b])  # Get non-zero indices for this batch item
+            if non_zero_indices.size(0) > 0:
+                random_idx = torch.randint(0, non_zero_indices.size(0), (1,)).item()
+                selected_point = non_zero_indices[random_idx]
+                final_mask[b, selected_point[0], selected_point[1]] = 1  # Set the initial point
+                last_updated_points[b] = selected_point
+            else:
+                last_updated_points[b] = torch.tensor([0, 0], dtype=torch.long, device=object_mask.device)
+
+        # Calculate the current areas
+        current_areas = final_mask.sum(dim=[1, 2])
+
+        # Track which batches are still expanding
+        active_batches = current_areas < target_areas.to(current_areas.device)
+
+        while active_batches.any():
+            # Dilate the mask for all active batches
+            expanded_masks = torch.nn.functional.max_pool2d(
+                final_mask.unsqueeze(1), kernel_size=15, stride=1, padding=7
+            ).squeeze(1)
+            # Ensure expanded mask stays within the original object mask
+            new_mask = expanded_masks * object_mask
+
+            new_mask = torch.where(
+                active_batches.unsqueeze(1).unsqueeze(2), new_mask, final_mask
+            )
+
+            # Find newly added points (where final_mask was 0 but new_mask is 1)
+            newly_added = (new_mask - final_mask) > 0
+
+            # If no new points are added for any active batch, break
+            if not newly_added.any():
+                break
+
+            # Update the final mask only for active batches
+            final_mask = new_mask
+
+            # Update current areas and active_batches
+            current_areas = final_mask.sum(dim=[1, 2])
+
+            # For each active batch, sample one of the newly added points
+            for b in range(batch_size):
+                if active_batches[b] == True:  # Process only active batches
+                    new_points = torch.nonzero(newly_added[b])  # Get newly added points
+                    if new_points.size(0) > 0:
+                        random_idx = torch.randint(0, new_points.size(0), (1,)).item()
+                        last_updated_points[b] = new_points[random_idx]  # Store the sampled point
+
+            active_batches = current_areas < target_areas.to(current_areas.device)
+
+        # Reshape final mask to [16, 256, 256, 1] to match the input format
+        final_mask = final_mask.unsqueeze(-1)
+
+        return final_mask, last_updated_points
+
+    
+    def make_anomaly_color(self, image, mask, back_image, alpha):
+        """
+        mask 部分に対して image と back_image を alpha に基づいてアルファブレンディングします。
+
+        Args:
+            image (torch.Tensor): 元画像 [B, 3, H, W]
+            mask (torch.Tensor): マスク画像 [B, H, W, 1]
+            back_image (torch.Tensor): 背景画像 [B, 3, H, W]
+            alpha (torch.Tensor): アルファ値 [B] (バッチごとに異なる)
+
+        Returns:
+            torch.Tensor: アルファブレンディング後の画像
+        """
+        dtype = image.dtype  # `image` のデータ型に統一する
+        mask = mask.to(dtype)
+        back_image = back_image.to(dtype)
+        alpha = alpha.to(dtype)
+
+        # mask の次元を調整 [B, H, W, 1] -> [B, 1, H, W] に変換
+        mask = mask.permute(0, 3, 1, 2)  # [B, 1, H, W]
+
+        # マスク領域で image と back_image をブレンディング
+        blended = (1 - alpha) * image + alpha * back_image
+
+        # mask を使って元の画像に合成
+        result = mask * blended + (1 - mask) * image
+
+        return result
+
+
+    def make_anomaly_bend(self, image, mask, points, angles, back_image, flow, random_mask):
+        """
+        Perform masked background replacement, rotate the image with distance-based angles, 
+        and reapply the rotated mask areas.
+        Args:
+            image: Tensor of shape [batch_size, 3, 256, 256]
+            mask: Tensor of shape [batch_size, 256, 256, 1]
+            points: Tensor of shape [batch_size, 2] (rotation centers for each batch)
+            angles: Tensor of shape [batch_size] (base rotation angles in radians)
+            back_image: Tensor of shape [batch_size, 3, 256, 256]
+            flow: Tensor of shape [batch_size, 256, 256, 2] (additional noise flow)
+        Returns:
+            output_image: Tensor of shape [batch_size, 3, 256, 256]
+            rotated_mask: Tensor of shape [batch_size, 1, 256, 256]
+            final_flow: Tensor of shape [batch_size, 2, 256, 256]
+        """
+
+        batch_size, _, height, width = image.shape
+
+        # Create a grid of normalized coordinates [-1, 1]
+        base_grid = torch.meshgrid(torch.linspace(-1, 1, height, device=image.device),
+                                torch.linspace(-1, 1, width, device=image.device))
+        base_grid = torch.stack((base_grid[1], base_grid[0]), 2)  # (x, y)
+        base_grid = base_grid.unsqueeze(0).repeat(batch_size, 1, 1, 1)  # [batch_size, height, width, 2]
+
+        # Normalize points to [-1, 1]
+        points = torch.stack(points).float().to(image.device)
+        points = 2.0 * points / torch.tensor([width - 1, height - 1], device=image.device) - 1.0  # [batch_size, 2]
+
+        # Compute distance from each pixel to the rotation center
+        distances = torch.sqrt((base_grid[..., 0] - points[:, 0].view(-1, 1, 1))**2 +
+                            (base_grid[..., 1] - points[:, 1].view(-1, 1, 1))**2)  # [batch_size, height, width]
+        distances[random_mask] = torch.ones_like(mask).squeeze(-1)[random_mask]
+        
+        masked_distances = distances * mask.squeeze(-1)  # [batch_size, height, width]
+
+        # max_distance = masked_distances.max(dim=2)[0].max(dim=1)[0]
+        max_distance = torch.max(masked_distances.view(batch_size, -1), dim=1).values
+        max_distance = torch.where(max_distance == 0, torch.tensor(1.0, device=max_distance.device), max_distance)
+
+        # Scale angles based on distance
+        scaled_angles = angles.view(-1, 1, 1) * distances / max_distance.view(-1, 1, 1) # [batch_size, height, width]
+
+        # Create empty grid to store the transformed coordinates
+        transformed_grid = base_grid.clone()
+
+        # Apply rotation per pixel by using the distance-dependent angle
+        cos_vals = torch.cos(scaled_angles)
+        sin_vals = torch.sin(scaled_angles)
+
+        # Apply the rotation transformation to the grid
+        transformed_grid[..., 0] = base_grid[..., 0] * cos_vals - base_grid[..., 1] * sin_vals
+        transformed_grid[..., 1] = base_grid[..., 0] * sin_vals + base_grid[..., 1] * cos_vals
+
+        # Step 1: Replace masked area with background
+        mask = mask.permute(0, 3, 1, 2)  # [batch_size, 1, 256, 256]
+        replaced_image = image * (1 - mask) + back_image * mask
+
+        # Step 2: Apply the flow noise
+        transformed_grid = transformed_grid + flow  # Add flow noise
+
+        # Step 3: Use grid_sample for image and mask
+        rotated_image = torch.nn.functional.grid_sample(image, transformed_grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        rotated_mask = torch.nn.functional.grid_sample(mask.float(), transformed_grid, mode='nearest', padding_mode='zeros', align_corners=False)
+
+        # Step 4: Combine rotated areas with replaced image
+        output_image = replaced_image * (1 - rotated_mask) + rotated_image * rotated_mask
+
+        # Step 5: Compute final flow
+        final_flow = (transformed_grid - base_grid).permute(0, 3, 1, 2) * rotated_mask
+
+        return output_image, rotated_mask, final_flow

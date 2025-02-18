@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+import logging
 
 
 class TimestepBlock(nn.Module):
@@ -231,7 +232,8 @@ class UNetModel(nn.Module):
             dropout=0,
             attention_resolutions="32,16,8",
             biggan_updown=True,
-            in_channels=1
+            in_channels=1,
+            out_channels=3,
             ):
         self.dtype = torch.float32
         super().__init__()
@@ -256,7 +258,7 @@ class UNetModel(nn.Module):
         self.image_size = img_size
         self.in_channels = in_channels
         self.model_channels = base_channels
-        self.out_channels = in_channels
+        self.out_channels = out_channels
         self.num_res_blocks = num_res_blocks
         self.attention_resolutions = attention_resolutions
         self.dropout = dropout
@@ -445,4 +447,4 @@ if __name__ == "__main__":
 
     x = torch.randn(1, 3, 512, 512)
     t_batch = torch.tensor([1], device=x.device).repeat(x.shape[0])
-    print(model(x, t_batch).shape)
+    logging.info(model(x, t_batch).shape)

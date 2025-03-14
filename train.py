@@ -121,8 +121,8 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
 
             temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
     
-    if sub_class != 'clip':
-        temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
+    # if sub_class != 'clip':
+    #     temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
 
     tqdm_epoch = range(start_epoch, args['EPOCHS'])
     for epoch in tqdm_epoch:

@@ -11,6 +11,8 @@ import cv2
 from matplotlib.colors import Normalize
 import logging
 from io import BytesIO
+from PIL import Image
+
 
 def get_beta_schedule(num_diffusion_steps, name="cosine"):
     betas = []

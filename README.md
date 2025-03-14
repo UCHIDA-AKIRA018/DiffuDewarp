@@ -1,5 +1,8 @@
 # DiffuDewarp
-![overview](https://github.com/UCHIDA-AKIRA018/DiffuDewarp/edit/main//overview.pdf)
+![overview](https://github.com/UCHIDA-AKIRA018/DiffuDewarp/blob/main/imgs/overview.png)
+**Measuring distortion strength with Dewarping Diffusion Models in Anomaly Detection**
+
+Akira Uchida, Satoshi Ikehata, Yuichi Yoshida, Ikuro Sato
 ## Get Started
 ### Environment
 ```

@@ -2,10 +2,7 @@
 VENV_DiffusionAD
 **/__pycache__
 
-Diffuwarp.e*
-Diffuwarp.o*
-Diffuwarp_test.e*
-Diffuwarp_test.o*
+DiffuDewarp_*
 
 tensorboard
 output

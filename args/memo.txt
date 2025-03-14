@@ -1,0 +1,6 @@
+9 DiffusionAD clip
+10 DiffusionAD Mvtec
+11 DiffuDewarp Mvtec
+12 DiffuDewarp clip ×
+13 DiffuDewarp anomaly_color Mvtec
+14 DiffuDewarp anomaly_color clip ×

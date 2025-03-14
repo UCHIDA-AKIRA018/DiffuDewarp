@@ -6,6 +6,7 @@ from sklearn.metrics import roc_auc_score
 import time
 import numpy as np
 from scipy.ndimage import gaussian_filter
+from torchvision.transforms.functional import gaussian_blur
 import cv2
 import torch.nn as nn
 from models.Recon_subnetwork import UNetModel, update_ema_params
@@ -126,13 +127,14 @@ def load_checkpoint(param, device,sub_class,checkpoint_type,args):
     return loaded_model
 
 
-def load_parameters(device,sub_class,checkpoint_type):
+def load_parameters(device,checkpoint_type,param):
     
-    param = "args1.json"
     with open(f'./args/{param}', 'r') as f:
         args = json.load(f)
     args['arg_num'] = param[4:-5]
     args = defaultdict_from_json(args)
+
+    sub_class=args['subclass']
 
     output = load_checkpoint(param[4:-5], device,sub_class,checkpoint_type,args)
  
@@ -205,8 +207,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
     betas = get_beta_schedule(args['T'], args['beta_schedule'])
 
     ddpm_sample =  GaussianDiffusionModel(
-            args['img_size'], betas, loss_weight=args['loss_weight'],
-            loss_type=args['loss-type'], mode=args["mode"], img_channels=in_channels
+            args['img_size'], betas, loss_weight=args['loss_weight'], mode=args["mode"], img_channels=in_channels
             )
     
     
@@ -242,7 +243,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
             loss,pred_x_0_condition,pred_x_0_normal,pred_x_0_noisier,x_normal_t,x_noiser_t,pred_x_t_noisier = ddpm_sample.norm_guided_one_step_denoising_eval(unet_model, image, normal_t_tensor,noiser_t_tensor,args)
             pred_mask = seg_model(torch.cat((image, pred_x_0_condition), dim=1)) 
             out_mask = pred_mask
-        elif args['mode']=="Diffuwarp":
+        elif args['mode']=="DiffuDewarp":
             T = torch.tensor([T], device=image.device).repeat(image.shape[0])
             x_normal_t = torch.zeros_like(image)
             # TODO warping_denoising_ite_eval
@@ -275,7 +276,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
             true_magnitude_list.append(true_magnitude.item()*image.shape[2]/2)
 
 
-        if args['mode'] == "Diffuwarp":
+        if args['mode'] == "DiffuDewarp":
             esitmate_flow_x_all = flow_all[0,0,:,:]
             esitmate_flow_y_all = flow_all[0,1,:,:]
             estimate_magnitude_all = torch.sqrt(esitmate_flow_x_all**2 + esitmate_flow_y_all**2)
@@ -324,7 +325,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
 
         recon_condition = image_transform(pred_x_0_condition.detach().cpu().numpy()[0])
 
-        if args['mode'] == "Diffuwarp":
+        if args['mode'] == "DiffuDewarp":
             recon_normal_t = pred_x_0_normal.transpose(2, 0, 1)
             recon_noisier_t = pred_x_0_noisier.transpose(2, 0, 1)
             ano_map = image_weight * gaussian_filter(pred_mask[0, 0, :, :].detach().cpu().numpy(), sigma=blur) + weight * gaussian_filter(pred_mask_flow[0, 0, :, :].detach().cpu().numpy(), sigma=blur_flow)
@@ -354,21 +355,21 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         axes[0][1].axis('off')
 
         axes[0][2].imshow(x_normal_t.transpose(1, 2, 0).astype(np.uint8))
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             axes[1][1].set_title('none')
         elif args['mode'] =="DiffusionAD":
             axes[0][2].set_title('x_normal_t')
         axes[0][2].axis('off')
 
         axes[0][3].imshow(x_noiser_t.transpose(1, 2, 0).astype(np.uint8))
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             axes[1][1].set_title('none')
         elif args['mode'] =="DiffusionAD":
             axes[0][3].set_title('x_noiser_t')
         axes[0][3].axis('off')
 
         axes[0][4].imshow(pred_x_t_noisier.transpose(1, 2, 0).astype(np.uint8))
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             axes[1][1].set_title('none')
         elif args['mode'] =="DiffusionAD":
             axes[0][4].set_title('pred_x_t_noisier')
@@ -378,7 +379,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         axes[1][0].set_title('heatmap')
         axes[1][0].axis('off')
         
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             axes[1][1].imshow((out_mask_flow[0][0] * 256 / 2 * ((out_mask_flow[0][0] * 256 / 2 )) > 3) .detach().cpu().numpy().astype(np.uint8),cmap ='gray')
             axes[1][1].set_title('out_mask_flow')
         elif args['mode'] =="DiffusionAD":
@@ -387,21 +388,21 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         axes[1][1].axis('off')
 
         axes[1][2].imshow(recon_normal_t.transpose(1, 2, 0).astype(np.uint8))
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             axes[1][1].set_title('flow')
         elif args['mode'] =="DiffusionAD":
             axes[1][2].set_title('recon_normal')
         axes[1][2].axis('off')
 
         axes[1][3].imshow(recon_noisier_t.transpose(1, 2, 0).astype(np.uint8))
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             axes[1][1].set_title('flow_on_image')
         elif args['mode'] =="DiffusionAD":
             axes[1][3].set_title('recon_noisier')
         axes[1][3].axis('off')
 
         axes[1][4].imshow(recon_condition.transpose(1, 2, 0).astype(np.uint8))
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             axes[1][1].set_title('recon')
         elif args['mode'] =="DiffusionAD":
             axes[1][4].set_title('recon_con')
@@ -413,7 +414,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         plt.close()
 
     # # video
-    # if args['mode']=="Diffuwarp":
+    # if args['mode']=="DiffuDewarp":
     #     numpy_list = [img[0].permute(1,2,0).numpy() for img in out]
     #     np.save(savename.replace("png", "npy"), numpy_list)
 
@@ -423,7 +424,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
     auroc_image = round(roc_auc_score(total_image_gt,total_image_pred),4)*100
     logging.info(auroc_image)
     
-    if args['mode']=="Diffuwarp":
+    if args['mode']=="DiffuDewarp":
         auroc_pixel =  round(roc_auc_score(total_pixel_gt, image_weight*total_pixel_pred + weight*total_pixel_pred_flow),4)*100
     elif args['mode'] =="DiffusionAD":
         auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),4)*100
@@ -441,7 +442,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         true_magnitude_list = np.array(true_magnitude_list)
 
         # 散布図
-        if args['mode']=="Diffuwarp":
+        if args['mode']=="DiffuDewarp":
             estimate_magnitude_max_list = np.array(estimate_magnitude_max_list)
             coefficients = np.polyfit(true_magnitude_list, estimate_magnitude_max_list, 1)  # 1は一次式を意味する
             linear_fit = np.poly1d(coefficients)
@@ -467,27 +468,35 @@ def main():
     mvtec_classes = ['carpet', 'grid', 'leather', 'tile', 'wood', 'bottle', 'cable', 'capsule', 'hazelnut', 'metal_nut', 'pill', 'screw',
      'toothbrush', 'transistor', 'zipper']
 
+    if len(sys.argv[1:]) > 0:
+        files = sys.argv[1:]
+    else:
+        raise ValueError("Missing file argument")
+
+    # read file from argument
+    file = files[0]
+    file = f"args{file}.json"
+    checkpoint_type='99'
+
+    args, output = load_parameters(device,checkpoint_type,file)
+    logging.info(f"args{args['arg_num']}")
+
     if args['subclass'] == "all":
         current_classes = mvtec_classes
     else:
         current_classes = [args['subclass']]
-    checkpoint_type='best'
 
     for sub_class in current_classes:
-        args, output = load_parameters(device,sub_class,checkpoint_type)
-        logging.info(f"args{args['arg_num']}")
-        
+        logging.info(f"class: {sub_class}")
         in_channels = args["channels"]
         if args["mode"] == "DiffusionAD":
             out_channels = 3
-        elif args["mode"] == "Diffuwarp":
+        elif args["mode"] == "DiffuDewarp":
             out_channels = 5
         unet_model = UNetModel(args['img_size'][0], args['base_channels'], channel_mults=args['channel_mults'], dropout=args[
                     "dropout"], n_heads=args["num_heads"], n_head_channels=args["num_head_channels"],
                 in_channels=in_channels, out_channels=out_channels
                 ).to(device)
-
-
 
         seg_model=SegmentationSubNetwork(in_channels=6, out_channels=1).to(device)
 
@@ -509,7 +518,6 @@ def main():
                 
         data_len = len(testing_dataset) 
         test_loader = DataLoader(testing_dataset, batch_size=1,shuffle=False, num_workers=4)
-
         
         # make arg specific directories
         
@@ -518,7 +526,6 @@ def main():
                 os.makedirs(i)
             except OSError:
                 pass
-
 
         testing(test_loader, args,unet_model,seg_model,data_len,sub_class,class_type,checkpoint_type,device)
 

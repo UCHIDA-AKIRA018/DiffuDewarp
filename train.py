@@ -21,6 +21,8 @@ import pandas as pd
 from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 import logging
+import sys
+from torchvision.transforms.functional import gaussian_blur
 
 # def weights_init(m):
 #         classname = m.__class__.__name__
@@ -63,7 +65,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
     in_channels = args["channels"]
     if args["mode"] == "DiffusionAD":
         out_channels = 3
-    elif args["mode"] == "Diffuwarp":
+    elif args["mode"] == "DiffuDewarp":
         out_channels = 5
 
     unet_model = UNetModel(args['img_size'][0], args['base_channels'], channel_mults=args['channel_mults'], dropout=args[
@@ -75,8 +77,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
     betas = get_beta_schedule(args['T'], args['beta_schedule'])
 
     ddpm_sample =  GaussianDiffusionModel(
-            args['img_size'], betas, loss_weight=args['loss_weight'],
-            loss_type=args['loss-type'], mode=args["mode"], img_channels=in_channels
+            args['img_size'], betas, loss_weight=args['loss_weight'], mode=args["mode"], img_channels=in_channels
             )
 
     seg_model=SegmentationSubNetwork(in_channels=6, out_channels=1).to(device)
@@ -119,6 +120,9 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
             del loaded_best_model
 
             temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
+    
+    if sub_class != 'clip':
+        temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
 
     tqdm_epoch = range(start_epoch, args['EPOCHS'])
     for epoch in tqdm_epoch:
@@ -130,7 +134,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
         train_noise_loss = 0.0
         tbar = tqdm(training_dataset_loader)
         for i, sample in enumerate(tbar):
-            
+            image = sample['image'].to(device)
             aug_image=sample['augmented_image'].to(device)
             anomaly_mask = sample["anomaly_mask"].to(device)
             # goodなら0 合成なら1
@@ -147,8 +151,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
                 focal_loss = loss_focal(pred_mask,anomaly_mask)
                 smL1_loss = loss_smL1(pred_mask, anomaly_mask)
                 loss = noise_loss + 5*focal_loss + smL1_loss
-            elif args['mode']=="Diffuwarp":
-                # TODO new_warping_denoising_batch
+            elif args['mode']=="DiffuDewarp":
                 noise_loss, aug_image, anomaly_mask, pred_x0 = ddpm_sample.new_warping_denoising_batch(unet_model, image, args, perlin_mask=perlin_mask, perlin_mask_sec=perlin_mask_sec, object_mask=object_mask, another_image=another_image)
                 loss = noise_loss
 
@@ -195,8 +198,7 @@ def eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,dev
     betas = get_beta_schedule(args['T'], args['beta_schedule'])
 
     ddpm_sample =  GaussianDiffusionModel(
-            args['img_size'], betas, loss_weight=args['loss_weight'],
-            loss_type=args['loss-type'], mode=args["mode"], img_channels=in_channels
+            args['img_size'], betas, loss_weight=args['loss_weight'], mode=args["mode"], img_channels=in_channels
             )
     
     logging.info(f"data_len: {data_len}",)
@@ -218,7 +220,7 @@ def eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,dev
             noiser_t_tensor = torch.tensor([args["eval_noisier_t"]], device=image.device).repeat(image.shape[0])
             loss, pred_x_0_condition, _, _, _, _, _ = ddpm_sample.norm_guided_one_step_denoising_eval(unet_model, image, normal_t_tensor,noiser_t_tensor,args)
             pred_mask = seg_model(torch.cat((image, pred_x_0_condition), dim=1)) 
-        elif args['mode']=="Diffuwarp":
+        elif args['mode']=="DiffuDewarp":
             t_tensor = torch.tensor([args["T"]], device=image.device).repeat(image.shape[0])
             # TODO warping_denoising_ite_eval
             pred_x_0, _, _, flow_all, _, _ = ddpm_sample.warping_denoising_ite_eval(unet_model, image, t_tensor, args, object_mask)
@@ -234,7 +236,7 @@ def eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,dev
         if args['mode']=="DiffusionAD":
             topk_out_mask = torch.flatten(out_mask[0], start_dim=1)
             flatten_gt_mask =gt_mask[0][[0],:,:].flatten().detach().cpu().numpy().astype(int)
-        elif args['mode']=="Diffuwarp":
+        elif args['mode']=="DiffuDewarp":
             flow_weight = 1/2
             if args['anomaly_color']:
                 image_weight = 1
@@ -261,7 +263,7 @@ def eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,dev
     
     if args['mode']=="DiffusionAD":
         auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),3)*100
-    elif args['mode']=="Diffuwarp":
+    elif args['mode']=="DiffuDewarp":
         auroc_pixel = round(roc_auc_score(total_pixel_gt, image_weight * total_pixel_pred + flow_weight*total_pixel_pred_flow),3)*100
 
     logging.info(f"Pixel AUC-ROC: {auroc_pixel}")
@@ -321,7 +323,13 @@ def save(unet_model,seg_model, args,final,epoch,sub_class,optimizer_ddpm,optimiz
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # read file from argument
-    file = "args1.json"
+    if len(sys.argv[1:]) > 0:
+        files = sys.argv[1:]
+    else:
+        raise ValueError("Missing file argument")
+    # read file from argument
+    file = files[0]
+    file = f"args{file}.json"
     # load the json args
     with open(f'./args/{file}', 'r') as f:
         args = json.load(f)
@@ -339,17 +347,24 @@ def main():
     else:
         current_classes = [args['subclass']]
 
-    class_type = ''
+    class_type='MVTec'
     for sub_class in current_classes:    
         logging.info(f"class: {sub_class}")
         subclass_path = os.path.join(args["mvtec_root_path"],sub_class)
-        training_dataset = MVTecTrainDataset(
-            subclass_path,sub_class,img_size=args["img_size"],args=args
-            )
-        testing_dataset = MVTecTestDataset(
-            subclass_path,sub_class,img_size=args["img_size"],
-            )
-        class_type='MVTec'
+        if sub_class != 'crip':
+            training_dataset = MVTecTrainDataset(
+                subclass_path,sub_class,img_size=args["img_size"],args=args
+                )
+            testing_dataset = MVTecTestDataset(
+                subclass_path,sub_class,img_size=args["img_size"],
+                )
+        else:
+            training_dataset = MVTecTrainDataset(
+                subclass_path,sub_class,img_size=[1300,1300],args=args
+                )
+            testing_dataset = MVTecTestDataset(
+                subclass_path,sub_class,img_size=[1300,1300],
+                )
         
         logging.info(args)     
         logging.info(file)     

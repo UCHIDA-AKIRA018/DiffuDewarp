@@ -4,8 +4,8 @@
 
 #$ -l gpu_1=1
 # 実行時間を指定
-#$ -l h_rt=1:00:00
-#$ -N Diffuwarp_10
+#$ -l h_rt=24:00:00
+#$ -N DiffuDewarp_12
 #$ -p -3
 # Moduleコマンドの初期化
 . /etc/profile.d/modules.sh
@@ -16,4 +16,4 @@ module load ffmpeg/6.1.1
 
 source VENV_DiffusionAD/bin/activate
 
-python train.py 10
+python train.py 12

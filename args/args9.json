@@ -25,5 +25,5 @@
   "eval_normal_t":200,
   "eval_noisier_t":400,
   "output_path":"outputs",
-  "subclass": "grid"
+  "subclass": "clip"
 }

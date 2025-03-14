@@ -3,6 +3,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchvision.transforms as T
+from simplex import Simplex_CLASS
+from softmax_splatting.softsplat import softsplat
+from torchvision.transforms.functional import gaussian_blur
+from sklearn.metrics import roc_auc_score,roc_curve,auc,average_precision_score
+import cv2
+from matplotlib.colors import Normalize
+import logging
+from io import BytesIO
 
 def get_beta_schedule(num_diffusion_steps, name="cosine"):
     betas = []
@@ -132,12 +140,12 @@ class GaussianDiffusionModel:
             img_size,
             betas,
             img_channels=1,
-            loss_type="l2",  # l2,l1 hybrid
             loss_weight='none',  # prop t / uniform / None
-            mode="DiffusionAD",  # DiffusionAD / Diffuwarp
+            mode="DiffusionAD",  # DiffusionAD / DiffuDewarp
             ):
         super().__init__()
 
+        self.simplex = Simplex_CLASS()
         if mode == "DiffusionAD":
             self.noise_fn = lambda x, t: torch.randn_like(x)
         elif mode == "DiffuDewarp":
@@ -145,7 +153,6 @@ class GaussianDiffusionModel:
 
         self.img_size = img_size
         self.img_channels = img_channels
-        self.loss_type = loss_type
         self.num_timesteps = len(betas)
 
         if loss_weight == 'prop-t':
@@ -190,8 +197,130 @@ class GaussianDiffusionModel:
         )
 
         self.gauss_blur = T.GaussianBlur(kernel_size=31, sigma=3)
-        
 
+    def get_flow_image(self,flow):
+        hsv = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
+        hsv[..., 1] = 255
+
+        # フローの方向と速度を計算
+        magnitude, angle = cv2.cartToPolar(flow[:,:,0].numpy(), flow[:,:,1].numpy())
+        hsv[..., 0] = angle * 180 / np.pi / 2
+        hsv[..., 2] = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX)
+
+        # HSVイメージをBGRに変換して表示
+        flow_visualization = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+         # 凡例を描画するための円形データを作成
+        legend_size = 50  # 小さめの凡例のサイズ
+        center_x, center_y = legend_size // 2, legend_size // 2
+        hue_legend = np.zeros((legend_size, legend_size, 3), dtype=np.uint8)
+
+        for y in range(legend_size):
+            for x in range(legend_size):
+                dx = x - center_x
+                dy = y - center_y
+                distance = np.sqrt(dx**2 + dy**2)
+                if distance < legend_size // 2:  # 円の内側のみ処理
+                    angle = np.arctan2(dy, dx)
+                    angle_deg = (angle * 180 / np.pi) % 360
+                    hue_legend[y, x, 0] = int(angle_deg / 2)  # HSVでHueは0-180にスケール
+                    hue_legend[y, x, 1] = 255  # 彩度
+                    hue_legend[y, x, 2] = 255  # 明度
+
+        # HSVイメージをBGRに変換
+        hue_legend_bgr = cv2.cvtColor(hue_legend, cv2.COLOR_HSV2BGR)
+
+        # 凡例を画像右上に埋め込む
+        legend_position_x = flow_visualization.shape[1] - legend_size - 20  # 右端から20px内側
+        legend_position_y = 20  # 上端から20px下
+        output = flow_visualization.copy()
+        output[
+            legend_position_y : legend_position_y + legend_size,
+            legend_position_x : legend_position_x + legend_size,
+        ] = hue_legend_bgr
+
+        return output
+
+    def show_flow_on_image(self,image,flow,min_magnitude=4.0,spacing=4):
+        # # Extract flow components
+        flow_x = flow[0, 0, :, :].cpu().numpy() * 128
+        flow_y = flow[0, 1, :, :].cpu().numpy() * 128
+
+        # # Compute the magnitude of the flow
+        magnitude = np.sqrt(flow_x**2 + flow_y**2)
+
+        # # Create a grid for quiver arrows
+        Y, X = np.mgrid[0:flow_x.shape[0], 0:flow_x.shape[1]]
+
+        # # Apply spacing and filter based on magnitude
+        Y = Y[::spacing, ::spacing]
+        X = X[::spacing, ::spacing]
+        flow_x = flow_x[::spacing, ::spacing]
+        flow_y = flow_y[::spacing, ::spacing]
+        magnitude = magnitude[::spacing, ::spacing]
+
+        # # Filter arrows based on minimum magnitude
+        mask = magnitude >= min_magnitude
+        X = X[mask]
+        Y = Y[mask]
+        U = flow_x[mask]
+        V = flow_y[mask]
+
+        fig, ax = plt.subplots()
+        ax.set_xticks([])  # x軸の目盛りを非表示
+        ax.set_yticks([])  # y軸の目盛りを非表示
+        ax.imshow(image.squeeze(0).permute(1, 2, 0).cpu().numpy(), cmap='gray')
+        # ax.quiver(X, Y, U, V, color='red', angles='xy', scale_units='xy', scale=1, headlength=2 ,headwidth=1)
+        mag, ang = cv2.cartToPolar(U, V, angleInDegrees=True)
+        # カラーマップの範囲を制御するためにNormalizeを使用
+        norm = Normalize(vmin=0, vmax=1)
+
+        if ang is None:
+            logging.info(ang)
+        else:
+            ang = (-ang - 120) % 360
+            ang = ang / 360.0
+            ax.quiver(X, Y, U, V, ang, cmap='hsv', angles='xy', scale_units='xy', scale=1, headlength=2 ,headwidth=1, norm = norm)
+
+        # 円形カラーバー（完全な円）を作成
+        circle_size = 70  # 円のサイズ
+        center = circle_size // 2
+        theta = np.linspace(0, 2 * np.pi, circle_size)
+        x, y = np.meshgrid(np.arange(circle_size), np.arange(circle_size))
+        distance = np.sqrt((x - center)**2 + (y - center)**2)
+
+        # カラーマップ用の角度データ
+        angle = (-np.arctan2(y - center, x - center) * 180 ) / np.pi - 120
+        angle[angle < 0] += 360
+
+        # 円形マスクの適用
+        circle_mask = distance <= (circle_size // 2)
+        circle_hsv = np.zeros((circle_size, circle_size, 4), dtype=np.uint8)  # RGBA形式
+        circle_hsv[..., 0] = (angle / 2).astype(np.uint8)  # Hue
+        circle_hsv[..., 1] = 255  # Saturation
+        circle_hsv[..., 2] = 255  # Brightness
+        circle_hsv[..., 3] = (circle_mask * 255).astype(np.uint8)  # アルファチャンネル（透明度）
+
+        # HSVからRGBAに変換
+        circle_rgb = cv2.cvtColor(circle_hsv[..., :3], cv2.COLOR_HSV2RGB)  # 最初の3チャンネルのみ使用
+        circle_rgba = np.dstack((circle_rgb, circle_hsv[..., 3]))  
+
+        # 保存されたプロットに円を追加
+        buf = BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
+        buf.seek(0)
+        flow_visualization = Image.open(buf).convert("RGBA")
+        buf.close()
+
+        # 円形カラーバーを右上に配置
+        circle_img = Image.fromarray(circle_rgba, mode="RGBA")
+        overlay_x = flow_visualization.width - circle_img.width - 30  # 右端から20px内側
+        overlay_y = 30  # 上端から20px下
+        flow_visualization.paste(circle_img, (overlay_x, overlay_y), circle_img)
+
+        plt.close(fig)  # Close the figure
+        flow_visualization = np.array(flow_visualization)
+        
+        return flow_visualization
 
     def sample_t_with_weights(self, b_size, device):
         p = self.weights / np.sum(self.weights)
@@ -370,16 +499,8 @@ class GaussianDiffusionModel:
         x_t = self.sample_q(x_0, t, noise)
         estimate_noise = model(x_t, t)
         loss = {}
-        if self.loss_type == "l1":
-            loss["loss"] = mean_flat((estimate_noise - noise).abs())
-        elif self.loss_type == "l2":
-            loss["loss"] = mean_flat((estimate_noise - noise).square())
-        elif self.loss_type == "hybrid":
-            # add vlb term
-            loss["vlb"] = self.calc_vlb_xt(model, x_0, x_t, t, estimate_noise)["output"]
-            loss["loss"] = loss["vlb"] + mean_flat((estimate_noise - noise).square())
-        else:
-            loss["loss"] = mean_flat((estimate_noise - noise).square())
+        loss["loss"] = mean_flat((estimate_noise - noise).square())
+        
         return loss, x_t, estimate_noise
 
    
@@ -446,25 +567,25 @@ class GaussianDiffusionModel:
             t = torch.randint(0, self.num_timesteps, (x_0.shape[0],), device=x_0.device)
 
         # anomaly_labels 0 good 1 anomaly(clip) 3 anomaly(MVtec)
-        if args['subclass'] == 'crip': 
-            anomaly_labels = torch.randint(0, 2, (x_0.shape[0],), device=x_0.device)
-        else: 
+        if args['subclass'] != 'clip': 
             anomaly_labels = torch.ones_like(t)*3
+        elif args['subclass'] == 'clip': 
+            anomaly_labels = torch.randint(0, 2, (x_0.shape[0],), device=x_0.device)
         
         target_areas = torch.randint(50, 1250, (x_0.shape[0],)) / args['img_size'][0] / args['img_size'][0] * x_0.shape[2] * x_0.shape[2] # Adjust area range as needed
 
-        if args['subclass'] == 'crip': 
+        if args['subclass'] != 'clip': 
+            object_mask_cropped = object_mask
+        elif args['subclass'] == 'clip': 
             # x_0をobejctmaskでcropし、それ以外は真っ黒に
             # x_0: train_image (no-synanomaly) torch.Size([16, 3, 256, 256])
             x_0 = torch.zeros_like(x_0) + x_0 * object_mask.permute(0,3,1,2).repeat(1, 3, 1, 1)
             back_image = torch.zeros_like(x_0)  # 背景は真っ黒
             object_mask_cropped = self.make_line_mask(object_mask)
-        else:
-            object_mask_cropped = object_mask
             
         # clipのためのマスクと基準点 
         mask, target_point = self.make_random_mask_for_bend(object_mask_cropped, target_areas)
-        if args['subclass'] != 'crip': 
+        if args['subclass'] != 'clip': 
             mask = perlin_mask
             back_image = x_0.clone()
 
@@ -481,18 +602,18 @@ class GaussianDiffusionModel:
         angle_t = max_angle * t / self.num_timesteps
         angle_t_1 = max_angle * torch.clamp(t-1, min=0) / self.num_timesteps
 
-        if args['subclass'] == 'crip': 
-            frequency = torch.full((t.shape[0],), 64) / args['img_size'][0] * x_0.shape[2]
-            noise_rate = torch.full((t.shape[0],), 6) / args['img_size'][0] * x_0.shape[2]
-        else:
+        if args['subclass'] != 'clip': 
             frequency = torch.full((t.shape[0],), 32) / args['img_size'][0] * x_0.shape[2]
             noise_rate = torch.full((t.shape[0],), 10) / args['img_size'][0] * x_0.shape[2]
+        elif args['subclass'] == 'clip':  
+            frequency = torch.full((t.shape[0],), 64) / args['img_size'][0] * x_0.shape[2]
+            noise_rate = torch.full((t.shape[0],), 6) / args['img_size'][0] * x_0.shape[2]
+            
         noise = self.noise_fn(x_0, t, frequency.numpy()).float()
         
-        if args['subclass'] == 'crip': 
+        isDeformation = torch.full((noise.shape[0],), True, device=x_0.device)
+        if args['subclass'] != 'clip': 
             isDeformation = (torch.rand(noise.shape[0]) < 0.5).to(x_0.device)
-        else:
-            isDeformation= (torch.ones_like(isDeformation).bool()).to(x_0.device)
 
         noise = noise[:,:2, :, :] * isDeformation.float().view(noise.shape[0], 1, 1, 1)  # (16, 1, 1, 1)
         max_noise = noise / noise_rate.view(t.shape[0], 1, 1, 1).to(x_0.device)
@@ -504,10 +625,10 @@ class GaussianDiffusionModel:
         flow_t_1 = noise_t_1.permute(0, 2, 3, 1)
         
         # x_t, x_t_1の作成
-        if args['subclass'] == 'crip': 
-            straight_mask = (torch.rand(x_0.shape[0]) > 0.5) # 50%の確率でTrueまたはFalseを生成
-        else:
+        if args['subclass'] != 'clip': 
             straight_mask = torch.ones(x_0.shape[0]) > 0.5 #全てstraight_mask
+        elif args['subclass'] == 'clip':  
+            straight_mask = (torch.rand(x_0.shape[0]) > 0.5) # 50%の確率でTrueまたはFalseを生成
 
         x_t, mask_x_t, flow_x_t_from_x_0  = self.make_anomaly_bend(x_0, mask, target_point, angle_t, back_image, flow_t, straight_mask)
         x_t_1, _, _ = self.make_anomaly_bend(x_0, mask, target_point, angle_t_1, back_image, flow_t_1, straight_mask)
@@ -553,6 +674,41 @@ class GaussianDiffusionModel:
             loss = loss_flow + mean_flat((estimate_x_t_1 - x_t_1).abs())+ mean_flat((estimate_x_0 - x_0).abs())
 
         return loss.mean(), x_t, mask_x_t, estimate_x_0
+
+    
+    def backwarp(self, target, flow):
+        grid_h, grid_w = target.shape[2], target.shape[3]
+        grid = torch.meshgrid(torch.linspace(-1, 1, grid_h), torch.linspace(-1, 1, grid_w))
+        grid = torch.stack((grid[1], grid[0]), 2)  # PyTorchのgridは (y, x) の順番であるため、(x, y) にする必要がある
+        grid = grid.unsqueeze(0).repeat(target.shape[0], 1, 1, 1).to(target.device)   
+        # [batch,256,256,2]
+
+        # グリッドをFlowで変形する
+        warped_grid = grid + flow[0].permute(1,2,0)
+        
+        warped_grid = warped_grid.clamp(-1, 1) # グリッドを -1 から 1 の範囲にクリップする
+
+        target = target
+        # 4. 変形したグリッドを使って画像をサンプリングする
+        target = torch.nn.functional.grid_sample(target, warped_grid, align_corners=True)
+
+        return target
+
+
+    def apply_dilation(self, object_mask, kernel_size=3, iterations=1):
+        # カーネルの定義（正方形の構造要素）
+        kernel = torch.ones((1, 1, kernel_size, kernel_size), device=object_mask.device)
+        
+        # マスクのチャンネル次元の追加
+        object_mask = object_mask.permute(0,3,1,2).float()  # [16, 256, 256, 1] -> [16, 1, 256, 256]
+        
+        # 膨張を複数回実行する場合
+        for _ in range(iterations):
+            object_mask = torch.nn.functional.conv2d(object_mask, kernel, padding=kernel_size // 2)
+            object_mask = (object_mask > 0).float()  # 0/1のバイナリに戻す
+
+        # 元の形状に戻す
+        return object_mask.permute(0,2,3,1)  # [16, 1, 256, 256] -> [16, 256, 256]
 
 
     def make_line_mask(self, mask):
@@ -837,3 +993,72 @@ class GaussianDiffusionModel:
         final_flow = (transformed_grid - base_grid).permute(0, 3, 1, 2) * rotated_mask
 
         return output_image, rotated_mask, final_flow
+
+
+    def warping_denoising_ite_eval(self, model, x_t, t_distance, args, object_mask):
+        seq = [x_t.cpu().detach()]
+        seq_x_0 = [x_t.cpu().detach()]
+        
+        object_mask = (object_mask > 0).float().unsqueeze(3)  # Trueの場合は1、Falseの場合は0に変換 
+        object_mask = self.apply_dilation(object_mask).permute(0,3,1,2)
+
+        if args['subclass'] == 'clip': 
+            x_t = torch.zeros_like(x_t) + x_t * object_mask.repeat(1,3,1,1)
+
+        seq = [x_t.cpu().detach()]
+        seq_x_0 = [x_t.cpu().detach()]
+
+        x_T = x_t.clone()
+        object_mask_T = object_mask.clone()
+        flow = torch.zeros_like(x_t)[:,:2,:,:]
+        flow_list = []
+
+        for t in range(int(t_distance) - 1, -1, -1):
+            t_batch = torch.tensor([t], device=x_t.device).repeat(x_t.shape[0])
+
+            with torch.no_grad():
+                estimate = model(x_t, t_batch)
+                estimate_x_0 = estimate[:,:3,:,:]
+                estimate_flow_x_t_from_x_0 = estimate[:,3:,:,:]
+
+                # 大きさの計算
+                magnitude = torch.norm(estimate_flow_x_t_from_x_0, dim=1)  # dim=0で各ピクセルの大きさを計算
+                # 閾値を設定
+                threshold = (3.0/(int(t_distance) - t) + 1.0) / (128*5) # 例: 0.5という閾値
+
+                flow_zero_mask = (magnitude < threshold).unsqueeze(0)
+                # 大きさが閾値以下のフローを0に設定
+                estimate_flow_x_t_from_x_0[flow_zero_mask.repeat(1,2,1,1)] = 0
+                flow_list.append(estimate_flow_x_t_from_x_0)
+
+                estimate_x_t_1, estimate_mask_x_t_1  = self.make_pre_image(x_t, estimate_flow_x_t_from_x_0, t_batch, object_mask)
+                estimate_x_t_1 = self.interporate_pre_image(estimate_x_t_1,estimate_mask_x_t_1,estimate_x_0, object_mask)
+                x_t = estimate_x_t_1
+                object_mask = estimate_mask_x_t_1
+
+                seq_x_0.append(estimate_x_0.cpu().detach())
+            seq.append(x_t.cpu().detach())
+
+        flow_all = torch.zeros_like(x_t)[:,:2,:,:]
+
+        for t in range(int(t_distance)):
+            flow = flow_list[-t]/(t + 1)
+            flow_x = flow[:, 0, :, :]
+            flow_y = flow[:, 1, :, :]
+            magnitude = torch.sqrt(flow_x**2 + flow_y**2)
+            mask = (magnitude > 0).unsqueeze(1).float()
+            flow = flow*mask
+
+            pre_mask, _ = self.make_pre_image(mask, flow, torch.ones_like(t_batch, dtype=torch.int), mask)
+            flow_all = self.backwarp(flow_all,flow) * ((mask == 1) | (pre_mask == 0)) + flow
+
+        flow_all = flow_all * object_mask_T
+    
+
+        x_0, object_mask  = self.make_pre_image(x_T, flow_all, torch.ones_like(t_batch, dtype=torch.int), object_mask_T)
+        flow_x = flow_all[:, 0, :, :]
+        flow_y = flow_all[:, 1, :, :]
+        magnitude = torch.sqrt(flow_x**2 + flow_y**2)
+        mask = (magnitude > 0).unsqueeze(1).float()
+        flow_all_inverce, _  = self.make_pre_image(flow_all, flow_all, torch.ones_like(t_batch, dtype=torch.int), mask)
+        return estimate_x_0, seq, seq_x_0, flow_all, flow_all_inverce, x_T

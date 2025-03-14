@@ -9,6 +9,7 @@ from PIL import Image
 from torchvision import transforms
 import random
 from data.perlin import rand_perlin_2d_np
+import csv
 
 texture_list = ['carpet', 'zipper', 'leather', 'tile', 'wood','grid']
 class MVTecTestDataset(Dataset):

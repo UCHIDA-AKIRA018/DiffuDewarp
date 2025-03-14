@@ -166,6 +166,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
             train_loss += loss.item()
             tbar.set_description('Epoch:%d, Train loss: %.3f' % (epoch, train_loss))
 
+        writer.add_scalar("loss", train_loss / len(training_dataset_loader), epoch)
         if (epoch+1) % 50==0 and epoch > 0:
             if sub_class != 'clip':
                 temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)

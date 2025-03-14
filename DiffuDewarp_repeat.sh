@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 80から94までの数値をループで処理
-# for i in {2037376..2037397}; 
+# for i in {3470239..3470244}; 
 # do
 #     qdel $i
 # done
@@ -24,6 +24,7 @@ do
 
 #$ -l gpu_1=1
 #$ -l h_rt=24:00:00
+#$ -p -3
 
 . /etc/profile.d/modules.sh
 

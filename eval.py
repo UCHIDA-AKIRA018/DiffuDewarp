@@ -238,8 +238,6 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         if args['mode']=="DiffusionAD":
             normal_t_tensor = torch.tensor([normal_t], device=image.device).repeat(image.shape[0])
             noiser_t_tensor = torch.tensor([noiser_t], device=image.device).repeat(image.shape[0])
-            normal_t_tensor = torch.tensor([args["eval_normal_t"]], device=image.device).repeat(image.shape[0])
-            noiser_t_tensor = torch.tensor([args["eval_noisier_t"]], device=image.device).repeat(image.shape[0])
             loss,pred_x_0_condition,pred_x_0_normal,pred_x_0_noisier,x_normal_t,x_noiser_t,pred_x_t_noisier = ddpm_sample.norm_guided_one_step_denoising_eval(unet_model, image, normal_t_tensor,noiser_t_tensor,args)
             pred_mask = seg_model(torch.cat((image, pred_x_0_condition), dim=1)) 
             out_mask = pred_mask

@@ -12,6 +12,7 @@ from matplotlib.colors import Normalize
 import logging
 from io import BytesIO
 from PIL import Image
+import torchvision.transforms.functional as F
 import sys
 
 
@@ -648,6 +649,10 @@ class GaussianDiffusionModel:
         if t == None:
             t = torch.randint(0, self.num_timesteps, (x_0.shape[0],), device=x_0.device)
 
+        if args['subclass'] == 'clip':  
+            x_0, object_mask  = self.apply_random_transformations(x_0, object_mask.permute(0,3,1,2).repeat(1, 3, 1, 1))
+            object_mask = object_mask.permute(0,2,3,1)[:,:,:,:1]
+
         # anomaly_labels 0 good 1 anomaly(clip) 3 anomaly(MVtec)
         if args['subclass'] != 'clip': 
             anomaly_labels = torch.ones_like(t)*3
@@ -714,14 +719,15 @@ class GaussianDiffusionModel:
         x_t, mask_x_t, flow_x_t_from_x_0  = self.make_anomaly_bend(x_0, mask, target_point, angle_t, back_image, flow_t, straight_mask)
         x_t_1, _, _ = self.make_anomaly_bend(x_0, mask, target_point, angle_t_1, back_image, flow_t_1, straight_mask)
         
-        perlin_mask_sec = perlin_mask_sec.squeeze(-1)  # [16, 256, 256]
-        perlin_mask_sec[mask_x_t.squeeze(1) > 0] = 0
-        perlin_mask_sec[mask.squeeze(-1) > 0] = 0
-        perlin_mask_sec[object_mask.squeeze(-1) == 0] = 0
-        perlin_mask_sec_tmp = perlin_mask_sec.unsqueeze(-1).clone()
-        perlin_mask_sec = perlin_mask_sec.unsqueeze(-1) * (anomaly_labels != 0).view(x_0.shape[0], 1, 1, 1)
-
+        
         if args['anomaly_color']:
+            perlin_mask_sec = perlin_mask_sec.squeeze(-1)  # [16, 256, 256]
+            perlin_mask_sec[mask_x_t.squeeze(1) > 0] = 0
+            perlin_mask_sec[mask.squeeze(-1) > 0] = 0
+            perlin_mask_sec[object_mask.squeeze(-1) == 0] = 0
+            perlin_mask_sec_tmp = perlin_mask_sec.unsqueeze(-1).clone()
+            perlin_mask_sec = perlin_mask_sec.unsqueeze(-1) * (anomaly_labels != 0).view(x_0.shape[0], 1, 1, 1)
+
             max_alpha = torch.ones(x_0.shape[0], device=x_0.device).view(-1, 1, 1, 1)*0.5
             alpha_t = max_alpha
             x_t = self.make_anomaly_color(x_t,perlin_mask_sec,another_image, alpha_t)
@@ -734,11 +740,23 @@ class GaussianDiffusionModel:
         flow_x_t_from_x_0 = torch.nn.functional.interpolate(flow_x_t_from_x_0, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
         mask_x_t = torch.nn.functional.interpolate(mask_x_t, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
 
+        if args['subclass'] == 'clip':  
+            flow_T = max_noise.permute(0, 2, 3, 1)
+            x_T, mask_x_T, flow_x_T_from_x_0 = self.make_anomaly_bend(x_0, mask, target_point, max_angle, back_image, flow_T, straight_mask)
+            x_t_test, mask_x_t_test  = self.make_pre_image(x_T, flow_x_T_from_x_0, self.num_timesteps/(self.num_timesteps - t) , mask_x_T)
+            flow_x_t_from_x_0_test, _  = self.make_pre_image(flow_x_T_from_x_0, flow_x_T_from_x_0, self.num_timesteps/(self.num_timesteps - t) , mask_x_T)
+        
+            swap_mask = (torch.rand(x_t.shape[0]) < 0.5).to(x_t.device)  # Trueの箇所が入れ替え対象
+            x_t = torch.where(swap_mask.view(-1, 1, 1, 1), x_t_test, x_t)
+            mask_x_t = torch.where(swap_mask.view(-1, 1, 1, 1), mask_x_t_test, mask_x_t)
+            flow_x_t_from_x_0 = torch.where(swap_mask.view(-1, 1, 1, 1), flow_x_t_from_x_0_test, flow_x_t_from_x_0)
+
         # for i in range(t.shape[0]):
         #     self.show_image(x_0[i:i+1,:,:,:], f"test_final_{i}_{anomaly_labels[i]}_x_0")
         #     self.show_image(x_t_1[i:i+1,:,:,:], f"test_final_{i}_{anomaly_labels[i]}_x_{t[i].item()}_1_test")
         #     self.show_image(x_t[i:i+1,:,:,:], f"test_final_{i}_{anomaly_labels[i]}_x_{t[i].item()}_test")
         #     self.show_flow(flow_x_t_from_x_0[i,:,:,:].permute(1,2,0).to('cpu'), f"test_final_{i}_{anomaly_labels[i]}_flow_test")
+        #     self.show_image(mask_x_t[i:i+1,:,:,:].repeat(1, 3, 1, 1) , f"test_final_{i}_{anomaly_labels[i]}_mask")
         # sys.exit()
 
         # modelによる推定
@@ -796,6 +814,30 @@ class GaussianDiffusionModel:
 
         # 元の形状に戻す
         return object_mask.permute(0,2,3,1)  # [16, 1, 256, 256] -> [16, 256, 256]
+
+
+    def apply_random_transformations(self, images, masks):
+        """
+        画像とマスクに同一のランダム変換 (回転・並進) を適用
+        """
+        transformed_images = []
+        transformed_masks = []
+        
+        for image, mask in zip(images, masks):
+            # ランダムな変換パラメータを生成
+            angle = random.uniform(-10, 10)  # 回転角度
+            max_dx = 0.1 * image.shape[2]    # 並進量 (x方向)
+            max_dy = 0.1 * image.shape[1]    # 並進量 (y方向)
+            translate = (random.uniform(-max_dx, max_dx), random.uniform(-max_dy, max_dy))
+            
+            # 同じ変換を画像とマスクに適用
+            transformed_image = F.affine(image, angle=angle, translate=translate, scale=1.0, shear=(0.0, 0.0))
+            transformed_mask = F.affine(mask, angle=angle, translate=translate, scale=1.0, shear=(0.0, 0.0))
+            
+            transformed_images.append(transformed_image)
+            transformed_masks.append(transformed_mask)
+        
+        return torch.stack(transformed_images), torch.stack(transformed_masks)
 
 
     def make_line_mask(self, mask):

@@ -13,7 +13,9 @@ git clone [soft_splatting](https://github.com/sniklaus/softmax-splatting) and pl
 ### Datasets
 MvTec-AD: Download the dataset from [here](https://www.mvtec.com/company/research/datasets/mvtec-ad/). Images of these foregrounds can be downloaded from [DiffusionAD](https://github.com/HuiZhang0812/DiffusionAD?tab=readme-ov-file).
 
-AnoClip: Download the dataset from {hoge} and place it with the same structure as other MVTec categories.
+AnoClip: Download the dataset from [here](https://drive.google.com/drive/folders/1WZQrSfEOH0xigkGprWRFvbfFQP0cTboj?usp=drive_link) and place it with the same structure as other MVTec categories.
+
+Model: Download the learned model from [here](https://drive.google.com/drive/folders/1WZQrSfEOH0xigkGprWRFvbfFQP0cTboj?usp=drive_link)
 
 ### Train
 ```

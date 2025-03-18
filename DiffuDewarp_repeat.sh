@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 80から94までの数値をループで処理
-# for i in {3470239..3470244}; 
+# for i in {3470251..3470256}; 
 # do
 #     qdel $i
 # done
@@ -15,7 +15,7 @@
 #     "14"    
 # )
 # for i in "${items[@]}"; 
-for i in {9..14}; 
+for i in {120..125}; 
 do
     echo "args$iを実行"
     cat <<EOF > S_DiffuDewarp_$i.sh

@@ -4,16 +4,13 @@
 #     qdel $i
 # done
 
-# items=(
-#     "9"    
-#     "10"    
-#     "11"    
-#     "12"    
-#     "13"    
-#     "14"    
-# )
-# for i in "${items[@]}"; 
-for i in {9..14}; 
+items=(
+    "101"    
+    "103"    
+    "105"    
+)
+for i in "${items[@]}"; 
+# for i in {9..14}; 
 do
     echo "args$iを実行"
     cat <<EOF > S_DiffuDewarp_test_$i.sh

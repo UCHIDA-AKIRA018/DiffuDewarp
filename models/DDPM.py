@@ -12,6 +12,7 @@ from matplotlib.colors import Normalize
 import logging
 from io import BytesIO
 from PIL import Image
+import sys
 
 
 def get_beta_schedule(num_diffusion_steps, name="cosine"):
@@ -324,6 +325,85 @@ class GaussianDiffusionModel:
         
         return flow_visualization
 
+    def show_image(self,image,file_name):
+        # PyTorchテンソルをNumPy配列に変換
+        if isinstance(image, torch.Tensor):
+            # PyTorch Tensor の場合は .to() を使って CPU に移動
+            image_tmp = image.to('cpu').detach().numpy().copy()
+        elif isinstance(image, np.ndarray):
+            # NumPy 配列の場合はそのままコピー
+            image_tmp = image.copy()
+
+        # image_tmp = image.to('cpu').detach().numpy().copy()
+        if image_tmp.shape[0] == 1:
+            image_tmp = image_tmp[0].transpose(1, 2, 0)  # [C, H, W] -> [H, W, C]
+        # else:
+        #     image_tmp = image_tmp.transpose(1, 2, 0)  # [C, H, W] -> [H, W, C]
+        
+        # グレースケールの場合、最後の次元を削除
+        if image_tmp.shape[-1] == 1:
+            image_tmp = image_tmp[:, :, 0]
+        
+        # 値を0〜255の範囲にスケーリングし、uint8型に変換
+        image_tmp = (image_tmp - image_tmp.min()) / (image_tmp.max() - image_tmp.min()) * 255
+        image_tmp = image_tmp.astype(np.uint8)
+
+        # RGB -> BGRに変換（カラーチャンネルの反転）
+        if image_tmp.ndim == 3 and image_tmp.shape[2] == 3:  # カラー画像の場合
+            image_tmp = cv2.cvtColor(image_tmp, cv2.COLOR_RGB2BGR)
+        
+        # OpenCVで画像を保存
+        cv2.imwrite(file_name + '.png', image_tmp)
+
+    def show_flow(self,flow,file_name):
+
+        hsv = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
+        hsv[..., 1] = 255
+
+        # フローの方向と速度を計算
+        magnitude, angle = cv2.cartToPolar(flow[:, :, 0].numpy(), flow[:, :, 1].numpy())
+        hsv[..., 0] = angle * 180 / np.pi / 2
+        normalized_magnitude = np.clip(magnitude * 128 * 30, 0, 255)
+        hsv[..., 2] = normalized_magnitude.astype(np.uint8)
+
+        # HSVイメージをBGRに変換
+        flow_visualization = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        # 凡例を描画するための円形データを作成
+        legend_size = 50  # 小さめの凡例のサイズ
+        center_x, center_y = legend_size // 2, legend_size // 2
+        hue_legend = np.zeros((legend_size, legend_size, 3), dtype=np.uint8)
+
+        for y in range(legend_size):
+            for x in range(legend_size):
+                dx = x - center_x
+                dy = y - center_y
+                distance = np.sqrt(dx**2 + dy**2)
+                if distance < legend_size // 2:  # 円の内側のみ処理
+                    angle = np.arctan2(dy, dx)
+                    angle_deg = (angle * 180 / np.pi) % 360
+                    hue_legend[y, x, 0] = int(angle_deg / 2)  # HSVでHueは0-180にスケール
+                    hue_legend[y, x, 1] = 255  # 彩度
+                    hue_legend[y, x, 2] = 255  # 明度
+
+        # HSVイメージをBGRに変換
+        hue_legend_bgr = cv2.cvtColor(hue_legend, cv2.COLOR_HSV2BGR)
+
+        # 凡例を画像右上に埋め込む
+        legend_position_x = flow_visualization.shape[1] - legend_size - 20  # 右端から20px内側
+        legend_position_y = 20  # 上端から20px下
+        output = flow_visualization.copy()
+        output[
+            legend_position_y : legend_position_y + legend_size,
+            legend_position_x : legend_position_x + legend_size,
+        ] = hue_legend_bgr
+
+        # 画像を保存
+        plt.imshow(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
+        plt.axis("off")
+        plt.savefig(file_name, bbox_inches="tight", pad_inches=0)
+        plt.close()
+
     def sample_t_with_weights(self, b_size, device):
         p = self.weights / np.sum(self.weights)
         indices_np = np.random.choice(len(p), size=b_size, p=p)
@@ -594,7 +674,6 @@ class GaussianDiffusionModel:
         # ラベルが0ならなしに　
         mask = mask * ((anomaly_labels == 1) | (anomaly_labels == 3)).view(x_0.shape[0], 1, 1, 1)
         
-        # 30度から180度の範囲でランダムな角度を生成（正負含む）
         degrees = torch.rand(x_0.shape[0]) * (90 - 0)
         radians = degrees * (torch.pi / 180)  # ラジアンに変換
         # 正負の符号をランダムに決定
@@ -642,10 +721,9 @@ class GaussianDiffusionModel:
         perlin_mask_sec_tmp = perlin_mask_sec.unsqueeze(-1).clone()
         perlin_mask_sec = perlin_mask_sec.unsqueeze(-1) * (anomaly_labels != 0).view(x_0.shape[0], 1, 1, 1)
 
-        max_alpha = torch.ones(x_0.shape[0], device=x_0.device).view(-1, 1, 1, 1)*0.5
-        alpha_t = max_alpha
-
         if args['anomaly_color']:
+            max_alpha = torch.ones(x_0.shape[0], device=x_0.device).view(-1, 1, 1, 1)*0.5
+            alpha_t = max_alpha
             x_t = self.make_anomaly_color(x_t,perlin_mask_sec,another_image, alpha_t)
             x_t_1 = self.make_anomaly_color(x_t_1,perlin_mask_sec,another_image,alpha_t)
 
@@ -655,6 +733,13 @@ class GaussianDiffusionModel:
         x_t_1 = torch.nn.functional.interpolate(x_t_1, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
         flow_x_t_from_x_0 = torch.nn.functional.interpolate(flow_x_t_from_x_0, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
         mask_x_t = torch.nn.functional.interpolate(mask_x_t, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
+
+        # for i in range(t.shape[0]):
+        #     self.show_image(x_0[i:i+1,:,:,:], f"test_final_{i}_{anomaly_labels[i]}_x_0")
+        #     self.show_image(x_t_1[i:i+1,:,:,:], f"test_final_{i}_{anomaly_labels[i]}_x_{t[i].item()}_1_test")
+        #     self.show_image(x_t[i:i+1,:,:,:], f"test_final_{i}_{anomaly_labels[i]}_x_{t[i].item()}_test")
+        #     self.show_flow(flow_x_t_from_x_0[i,:,:,:].permute(1,2,0).to('cpu'), f"test_final_{i}_{anomaly_labels[i]}_flow_test")
+        # sys.exit()
 
         # modelによる推定
         estimate_x_t_1 = model(x_t, t)

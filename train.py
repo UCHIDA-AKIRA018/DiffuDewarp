@@ -339,6 +339,8 @@ def main():
 
     if 'anomaly_color' not in args:
         args['anomaly_color'] = False
+    if 'perlin_scale' not in args:
+        args['perlin_scale'] = 6
 
     mvtec_classes = ['carpet', 'grid', 'leather', 'tile', 'wood', 'bottle', 'cable', 'capsule', 'hazelnut', 'metal_nut', 'pill', 'screw',
             'toothbrush', 'transistor', 'zipper']

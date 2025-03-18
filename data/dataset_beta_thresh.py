@@ -99,6 +99,7 @@ class MVTecTrainDataset(Dataset):
         self.root_dir = os.path.join(data_path,'train','good')
         self.resize_shape = [img_size[0], img_size[1]]
         self.anomaly_source_path = args["anomaly_source_path"]
+        self.perlin_scale = args["perlin_scale"]
 
         self.image_paths = sorted(glob.glob(self.root_dir+"/*.png"))
         self.anomaly_source_paths = sorted(glob.glob(self.anomaly_source_path+"/images/*/*.jpg"))
@@ -197,7 +198,7 @@ class MVTecTrainDataset(Dataset):
             return image, np.zeros((self.resize_shape[0], self.resize_shape[1], 1), dtype=np.float32), np.array([0.0], dtype=np.float32), np.zeros((self.resize_shape[0], self.resize_shape[1], 1), dtype=np.float32), image
 
         else:
-            perlin_scale = 2  
+            perlin_scale = self.perlin_scale
             min_perlin_scale = 0
             perlin_scalex = 2 ** (torch.randint(min_perlin_scale,
                                   perlin_scale, (1,)).numpy()[0])

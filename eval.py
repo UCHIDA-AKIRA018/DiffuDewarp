@@ -420,24 +420,8 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
 
     #     numpy_list_x_0 = [img[0].permute(1,2,0).numpy() for img in out_x_0]
     #     np.save(savename.replace(".png", "_x_0.npy"), numpy_list_x_0)
-    
-    auroc_image = round(roc_auc_score(total_image_gt,total_image_pred),4)*100
-    logging.info(auroc_image)
-    
-    if args['mode']=="DiffuDewarp":
-        auroc_pixel =  round(roc_auc_score(total_pixel_gt, image_weight*total_pixel_pred + weight*total_pixel_pred_flow),4)*100
-    elif args['mode'] =="DiffusionAD":
-        auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),4)*100
 
-    auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),3)*100
-    logging.info(f"Pixel AUC-ROC: {auroc_pixel}")
-
-    temp = {"classname":[sub_class],"Image-AUROC": [auroc_image],"Pixel-AUROC":[auroc_pixel]}
-    df_class = pd.DataFrame(temp)
-    df_class.to_csv(f"{args['output_path']}/metrics/ARGS={args['arg_num']}/{class_type}_{checkpoint_type}ck.csv", mode='a',header=False,index=False)
-
-    
-    if len(points) > 0:
+    if args['subclass'] == 'clip':
         plt.figure(figsize=(10, 6))
         true_magnitude_list = np.array(true_magnitude_list)
 
@@ -459,8 +443,26 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         plt.ylabel("Estimated Anomaly score")
         plt.legend()
         plt.grid(True)
-        plt.savefig(f'{args["output_path"]}/metrics/ARGS={args["arg_num"]}/{sub_class}/{subsub_class}/visualization_{checkpoint_type}ck/flow_curve_esti_test_new.png')
+        plt.savefig(f'{args["output_path"]}/metrics/ARGS={args["arg_num"]}/{sub_class}/visualization_{checkpoint_type}ck/flow_curve_esti_test_new.png')
         plt.show()  
+    else:
+        auroc_image = round(roc_auc_score(total_image_gt,total_image_pred),4)*100
+        logging.info(auroc_image)
+        
+        if args['mode']=="DiffuDewarp":
+            auroc_pixel =  round(roc_auc_score(total_pixel_gt, image_weight*total_pixel_pred + weight*total_pixel_pred_flow),4)*100
+        elif args['mode'] =="DiffusionAD":
+            auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),4)*100
+
+        auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),3)*100
+        logging.info(f"Pixel AUC-ROC: {auroc_pixel}")
+
+        temp = {"classname":[sub_class],"Image-AUROC": [auroc_image],"Pixel-AUROC":[auroc_pixel]}
+        df_class = pd.DataFrame(temp)
+        df_class.to_csv(f"{args['output_path']}/metrics/ARGS={args['arg_num']}/{class_type}_{checkpoint_type}ck.csv", mode='a',header=False,index=False)
+
+    
+    
 
 def main():
 
@@ -476,7 +478,8 @@ def main():
     # read file from argument
     file = files[0]
     file = f"args{file}.json"
-    checkpoint_type='99'
+
+    checkpoint_type='best'
 
     args, output = load_parameters(device,checkpoint_type,file)
     logging.info(f"args{args['arg_num']}")

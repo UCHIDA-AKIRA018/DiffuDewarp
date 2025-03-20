@@ -82,13 +82,10 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
 
     seg_model=SegmentationSubNetwork(in_channels=6, out_channels=1).to(device)
 
-    optimizer_ddpm = optim.Adam( unet_model.parameters(), lr=args['diffusion_lr'],weight_decay=args['weight_decay'])
-    optimizer_seg = optim.Adam(seg_model.parameters(),lr=args['seg_lr'],weight_decay=args['weight_decay'])
-
+    
     loss_focal = BinaryFocalLoss().to(device)
     loss_smL1= nn.SmoothL1Loss().to(device)
     
-    scheduler_seg =optim.lr_scheduler.CosineAnnealingLR(optimizer_seg, T_max=10, eta_min=0, last_epoch=- 1, verbose=False)
 
     # 保存読み込み
     dir_path =f'{args["output_path"]}/model/diff-params-ARGS={args["arg_num"]}/{sub_class}'
@@ -105,10 +102,6 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
         unet_model.load_state_dict(loaded_last_model["unet_model_state_dict"])
         seg_model.load_state_dict(loaded_last_model["seg_model_state_dict"])
         start_epoch = loaded_last_model['n_epoch'] + 1
-        optimizer_ddpm.load_state_dict(loaded_last_model["optimizer_ddpm_state_dict"])
-        optimizer_seg.load_state_dict(loaded_last_model["optimizer_seg_state_dict"])
-        scheduler_seg.load_state_dict(loaded_last_model["scheduler_seg_state_dict"])
-        del loaded_last_model
 
         # 最も結果が良かったモデル
         if sub_class != 'clip':
@@ -121,6 +114,16 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
 
             temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
     
+    optimizer_ddpm = optim.Adam( unet_model.parameters(), lr=args['diffusion_lr'],weight_decay=args['weight_decay'])
+    optimizer_seg = optim.Adam(seg_model.parameters(),lr=args['seg_lr'],weight_decay=args['weight_decay'])
+    scheduler_seg =optim.lr_scheduler.CosineAnnealingLR(optimizer_seg, T_max=10, eta_min=0, last_epoch=- 1, verbose=False)
+
+    if model_files:
+        optimizer_ddpm.load_state_dict(loaded_last_model["optimizer_ddpm_state_dict"])
+        optimizer_seg.load_state_dict(loaded_last_model["optimizer_seg_state_dict"])
+        scheduler_seg.load_state_dict(loaded_last_model["scheduler_seg_state_dict"])
+        del loaded_last_model
+
     # if sub_class != 'clip':
     #     temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
 
@@ -167,13 +170,15 @@ def train(training_dataset_loader, testing_dataset_loader, args, data_len,sub_cl
             tbar.set_description('Epoch:%d, Train loss: %.3f' % (epoch, train_loss))
 
         writer.add_scalar("loss", train_loss / len(training_dataset_loader), epoch)
+        writer.add_scalar("lr", scheduler_seg.get_lr()[0], epoch)
+       
         if (epoch+1) % 50==0 and epoch > 0:
             if sub_class != 'clip':
                 temp_image_auroc,temp_pixel_auroc= eval(testing_dataset_loader,args,unet_model,seg_model,data_len,sub_class,device)
                 writer.add_scalar("eval: image_auroc", temp_image_auroc, epoch)     
                 writer.add_scalar("eval: pixel_auroc", temp_pixel_auroc, epoch) 
                 if(temp_image_auroc+temp_pixel_auroc>=best_image_auroc+best_pixel_auroc):
-                    if temp_image_auroc>=best_image_auroc:
+                    # if temp_image_auroc>=best_image_auroc:
                         save(unet_model,seg_model, args=args,final='best',epoch=epoch,sub_class=sub_class,optimizer_ddpm=optimizer_ddpm,optimizer_seg=optimizer_seg,scheduler_seg=scheduler_seg,best_image_auroc=best_image_auroc,best_pixel_auroc=best_pixel_auroc)
                         best_image_auroc = temp_image_auroc
                         best_pixel_auroc = temp_pixel_auroc
@@ -341,6 +346,12 @@ def main():
         args['anomaly_color'] = False
     if 'perlin_scale' not in args:
         args['perlin_scale'] = 6
+
+    # only clip
+    if 'good_random' not in args:
+        args['good_random'] = False
+    if 'test_type_data' not in args:
+        args['test_type_data'] = False
 
     mvtec_classes = ['carpet', 'grid', 'leather', 'tile', 'wood', 'bottle', 'cable', 'capsule', 'hazelnut', 'metal_nut', 'pill', 'screw',
             'toothbrush', 'transistor', 'zipper']

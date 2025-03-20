@@ -452,7 +452,7 @@ def testing(testing_dataset_loader, args,unet_model,seg_model,data_len,sub_class
         elif args['mode'] =="DiffusionAD":
             auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),4)*100
 
-        auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),3)*100
+        # auroc_pixel =  round(roc_auc_score(total_pixel_gt, total_pixel_pred),3)*100
         logging.info(f"Pixel AUC-ROC: {auroc_pixel}")
 
         temp = {"classname":[sub_class],"Image-AUROC": [auroc_image],"Pixel-AUROC":[auroc_pixel]}

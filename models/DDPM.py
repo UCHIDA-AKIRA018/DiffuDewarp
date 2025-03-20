@@ -649,7 +649,7 @@ class GaussianDiffusionModel:
         if t == None:
             t = torch.randint(0, self.num_timesteps, (x_0.shape[0],), device=x_0.device)
 
-        if args['subclass'] == 'clip':  
+        if args['good_random']:  
             x_0, object_mask  = self.apply_random_transformations(x_0, object_mask.permute(0,3,1,2).repeat(1, 3, 1, 1))
             object_mask = object_mask.permute(0,2,3,1)[:,:,:,:1]
 
@@ -697,9 +697,11 @@ class GaussianDiffusionModel:
             
         noise = self.noise_fn(x_0, t, frequency.numpy()).float()
         
-        isDeformation = torch.full((noise.shape[0],), True, device=x_0.device)
+        isDeformation = (torch.rand(noise.shape[0]) < 0.5).to(x_0.device)
         if args['subclass'] != 'clip': 
-            isDeformation = (torch.rand(noise.shape[0]) < 0.5).to(x_0.device)
+            # isDeformation = (torch.rand(noise.shape[0]) < 0.5).to(x_0.device)
+            # isDeformation= (torch.ones_like(isDeformation).bool()).to(x_0.device)
+            isDeformation= (torch.ones_like(isDeformation).bool()).to(x_0.device)
 
         noise = noise[:,:2, :, :] * isDeformation.float().view(noise.shape[0], 1, 1, 1)  # (16, 1, 1, 1)
         max_noise = noise / noise_rate.view(t.shape[0], 1, 1, 1).to(x_0.device)
@@ -740,7 +742,7 @@ class GaussianDiffusionModel:
         flow_x_t_from_x_0 = torch.nn.functional.interpolate(flow_x_t_from_x_0, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
         mask_x_t = torch.nn.functional.interpolate(mask_x_t, size=(args['img_size'][0], args['img_size'][1]), mode='bilinear', align_corners=False)
 
-        if args['subclass'] == 'clip':  
+        if args['test_type_data']:  
             flow_T = max_noise.permute(0, 2, 3, 1)
             x_T, mask_x_T, flow_x_T_from_x_0 = self.make_anomaly_bend(x_0, mask, target_point, max_angle, back_image, flow_T, straight_mask)
             x_t_test, mask_x_t_test  = self.make_pre_image(x_T, flow_x_T_from_x_0, self.num_timesteps/(self.num_timesteps - t) , mask_x_T)
